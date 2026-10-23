@@ -1,0 +1,111 @@
+name: Windows x64
+
+on:
+  push:
+    branches: [main]
+    tags: ['[0-9]*.[0-9]*.[0-9]*', 'v[0-9]*.[0-9]*.[0-9]*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Build and test x64
+        shell: pwsh
+        run: ./scripts/build.ps1 -Architecture x64 -Test -NoInstall
+      - name: Native UI checks
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $report = Join-Path $PWD 'artifacts/ui-x64.txt'
+          New-Item -ItemType Directory -Path artifacts -Force | Out-Null
+          $app = Start-Process -FilePath ./build/x64/StarLibrary.exe -ArgumentList @('--ui-test', ('"' + $report + '"')) -PassThru
+          if (!$app.WaitForExit(60000)) { $app.Kill(); throw 'UI checks timed out.' }
+          Get-Content -LiteralPath $report
+          if ($app.ExitCode -ne 0) { throw 'UI checks failed.' }
+      - name: Package single executable
+        shell: pwsh
+        env:
+          BUILD_REF: ${{ github.ref }}
+          BUILD_REF_NAME: ${{ github.ref_name }}
+          BUILD_SHA: ${{ github.sha }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exe = Get-Item ./build/x64/StarLibrary.exe
+          if ($exe.Length -gt 1000000) { throw 'Executable exceeds 1,000,000 bytes.' }
+          $bytes = [IO.File]::ReadAllBytes($exe.FullName)
+          $pe = [BitConverter]::ToInt32($bytes, 0x3c)
+          if ([BitConverter]::ToUInt16($bytes, $pe + 4) -ne 0x8664) { throw 'Executable is not x64.' }
+          $version = $exe.VersionInfo.ProductVersion
+          if ($env:BUILD_REF.StartsWith('refs/tags/') -and $version -ne $env:BUILD_REF_NAME.TrimStart('v')) {
+            throw 'Tag does not match executable version.'
+          }
+          New-Item -ItemType Directory -Path dist -Force | Out-Null
+          Copy-Item -LiteralPath $exe.FullName -Destination dist/StarLibrary.exe
+          $hash = (Get-FileHash dist/StarLibrary.exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  StarLibrary.exe" | Set-Content dist/SHA256SUMS.txt -Encoding ascii
+          @("Star Library $version", '', 'Windows 10/11 x64，下载 StarLibrary.exe 后双击运行。',
+            '', "文件大小：$($exe.Length) 字节；无安装器、额外运行库或后台服务。",
+            '', '包含 Star 管理、中文 AI 概括、可续接的兴趣分类与画像、项目发现。',
+            '', '画像分类逐项保存，错误项跳过；重试复用有效分类。AI 与同步进度分别显示。',
+            '', "Commit: $env:BUILD_SHA", "SHA-256: $hash") | Set-Content dist/release-notes.md -Encoding utf8
+          "x64 $version : $($exe.Length) bytes" >> $env:GITHUB_STEP_SUMMARY
+      - name: Upload release files
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: star-library-windows-x64
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload validation reports
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: windows-x64-validation
+          path: |
+            artifacts/ui-x64.txt
+            build/x64/dependencies.txt
+          if-no-files-found: ignore
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: windows-2022
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Download tested executable
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: star-library-windows-x64
+          path: dist
+      - name: Publish GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          gh release view $env:RELEASE_TAG --json tagName 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $env:RELEASE_TAG dist/StarLibrary.exe dist/SHA256SUMS.txt --clobber
+          } else {
+            gh release create $env:RELEASE_TAG dist/StarLibrary.exe dist/SHA256SUMS.txt --verify-tag --latest --title "Star Library $env:RELEASE_TAG" --notes-file dist/release-notes.md
+          }
+          if ($LASTEXITCODE -ne 0) { throw 'Release publication failed.' }
