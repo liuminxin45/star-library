@@ -1563,7 +1563,7 @@ static LRESULT CALLBACK window_proc(HWND window, UINT msg, WPARAM wp, LPARAM lp)
         MINMAXINFO *m = (MINMAXINFO *)lp;
         m->ptMinTrackSize.x = MulDiv(980, a.dpi, 96);
         m->ptMinTrackSize.y = MulDiv(700, a.dpi, 96);
-        if (*a.capture) {
+        if (*a.capture || *a.ui_test_report) {
             /* Deterministic QA captures may extend beyond the active monitor. */
             m->ptMaxTrackSize.x = m->ptMaxTrackSize.y = 8192;
             m->ptMaxSize.x = m->ptMaxSize.y = 8192;
@@ -2153,7 +2153,7 @@ int ui_run(HINSTANCE instance, int show, const wchar_t *command) {
         a.selected = jnum(a.visible[0], "id");
     avatars_init(&a.storage, a.window);
     ShowWindow(a.window, show);
-    if (*a.capture) {
+    if (*a.capture || *a.ui_test_report) {
         RECT client, frame;
         GetClientRect(a.window, &client);
         GetWindowRect(a.window, &frame);
