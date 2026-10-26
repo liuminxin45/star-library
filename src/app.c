@@ -40,6 +40,8 @@ enum {
     ACT_SUMMARY,
     ACT_DIMENSION,
     ACT_CONCURRENCY,
+    ACT_RELEASE,
+    ACT_STAR_ME,
     ACT_EVIDENCE = 100000
 };
 enum { EDIT_SEARCH = 301, EDIT_GH_KEY, EDIT_AI_URL, EDIT_AI_MODEL, EDIT_AI_KEY };
@@ -60,11 +62,22 @@ typedef struct {
     char language[128];
 } ListState;
 typedef struct {
+    HWND notify;
+    HANDLE cancel;
+    char *token;
+    char latest[32];
+    bool ok;
+} UpdateCheck;
+typedef struct {
     HWND window, search, ghkey, aiurl, aimodel, aikey, tooltip;
     HFONT font;
     HBRUSH input_brush;
     HINSTANCE instance;
     HANDLE mutex, thread;
+    HANDLE update_thread;
+    UpdateCheck *update;
+    ULONGLONG update_checked;
+    char latest[32];
     Library library;
     Storage storage;
     Graphics gfx;
@@ -103,6 +116,41 @@ typedef struct {
     float thumb_top, thumb_height, drag_offset, track_top, track_height;
 } App;
 static App a;
+static DWORD WINAPI update_thread(void *context) {
+    UpdateCheck *check = context;
+    check->ok = update_latest(check->token, check->cancel, check->latest);
+    PostMessageW(check->notify, WM_UPDATE, 0, (LPARAM)check);
+    return 0;
+}
+static void update_cleanup(void) {
+    if (!a.update)
+        return;
+    SetEvent(a.update->cancel);
+    if (a.update_thread) {
+        WaitForSingleObject(a.update_thread, INFINITE);
+        CloseHandle(a.update_thread);
+    }
+    CloseHandle(a.update->cancel);
+    secure_free(a.update->token);
+    mem_free(a.update);
+    a.update = NULL;
+    a.update_thread = NULL;
+}
+static void update_start(void) {
+    if (a.test_preview || a.storage.demo || a.update || !a.storage.github_key || !*a.storage.github_key ||
+        (a.update_checked && GetTickCount64() - a.update_checked < 21600000))
+        return;
+    a.update = mem_alloc(sizeof(*a.update));
+    if (!a.update)
+        return;
+    a.update->notify = a.window;
+    a.update->token = str_copy(a.storage.github_key);
+    a.update->cancel = CreateEventW(NULL, TRUE, FALSE, NULL);
+    if (a.update->token && a.update->cancel)
+        a.update_thread = CreateThread(NULL, 0, update_thread, a.update, 0, NULL);
+    if (!a.update_thread)
+        update_cleanup();
+}
 static LRESULT CALLBACK window_proc(HWND, UINT, WPARAM, LPARAM);
 static bool save_settings(void);
 static void run_ui_tests(void);
@@ -347,7 +395,7 @@ static void position(HWND h, float x, float y, float w, float hgt, bool show) {
 typedef struct {
     float x, y, w;
 } SettingsFrame;
-#define SETTINGS_CONTENT 680
+#define SETTINGS_CONTENT 740
 static SettingsFrame settings_frame(void) {
     float available = a.width - a.side, w = available - 80;
     if (w > 720)
@@ -722,8 +770,8 @@ static void profile_page(void) {
     Palette p = colors();
     page_header(a.test_preview && !*a.snapshot ? "兴趣画像  ·  演示" : "兴趣画像", "");
     J *profile = jget(root(&a.library), "profile");
-    button(a.job && a.job->kind == JOB_PROFILE ? "分析中…" : "更新画像",
-           a.width - 152, 26, 120, ACT_PROFILE, 1, false, a.job != NULL);
+    button(a.job && a.job->kind == JOB_PROFILE ? "分析中…" : "更新画像", a.width - 152, 26, 120, ACT_PROFILE,
+           1, false, a.job != NULL);
     float x = a.side + 48, w = a.width - x - 48, y = 110.0f - a.profile_scroll;
     if (w > 820)
         w = 820;
@@ -842,7 +890,14 @@ static void settings_page(void) {
     button("导出", x + w - 256, y + 576, 72, ACT_EXPORT, 0, false, a.job != NULL);
     button("导入", x + w - 176, y + 576, 72, ACT_IMPORT, 0, false, a.job != NULL);
     button("数据目录", x + w - 96, y + 576, 96, ACT_DIR, 0, false, false);
-    button("关于与许可", x + w - 108, y + 630, 108, ACT_ABOUT, 0, false, false);
+    text("版本 " APP_VERSION, x, y + 630, w - 200, 34, 1, p.muted);
+    char release[96];
+    sprintf_s(release, sizeof(release), version_newer(a.latest, APP_VERSION) ? "新版本 %s" : "Release",
+              a.latest);
+    button(release, x + w - 144, y + 630, 144, ACT_RELEASE, 0, false, false);
+    button("关于与许可", x - 12, y + 684, 120, ACT_ABOUT, 0, false, false);
+    button("Star me", x + w - 96, y + 684, 96, ACT_STAR_ME, 0, false, a.job != NULL);
+    text(a.update ? "检查更新中…" : "", x + 130, y + 630, w - 300, 34, 1, p.faint);
     gfx_unclip(&a.gfx);
 }
 static int current_scroll(void) {
@@ -910,7 +965,7 @@ static void paint(void) {
                    p.muted, false);
         if (a.job)
             button("取消任务", a.width - 136, a.height - 39, 104, ACT_CANCEL, 0, false,
-                   a.job->kind == JOB_STAR);
+                   a.job->kind == JOB_STAR || a.job->kind == JOB_SUPPORT);
     }
     if (a.page == PAGE_SETTINGS)
         qsort(a.targets, a.target_count, sizeof(Target), settings_target_order);
@@ -1219,10 +1274,20 @@ static void perform(int action, uint64_t id) {
         redraw();
         return;
     }
-    if (a.job && (action == ACT_SAVE || action == ACT_IMPORT || action == ACT_IGNORE ||
-                  action == ACT_THEME || action == ACT_DISCONNECT))
+    if (a.job && (action == ACT_SAVE || action == ACT_IMPORT || action == ACT_IGNORE || action == ACT_THEME ||
+                  action == ACT_DISCONNECT))
         return;
     switch (action) {
+    case ACT_RELEASE:
+        ShellExecuteW(a.window, L"open", PROJECT_URL L"/releases/latest", NULL, NULL, SW_SHOWNORMAL);
+        break;
+    case ACT_STAR_ME:
+        if (a.storage.demo)
+            break;
+        ShellExecuteW(a.window, L"open", PROJECT_URL, NULL, NULL, SW_SHOWNORMAL);
+        if (a.storage.github_key && *a.storage.github_key && !a.job)
+            start_job(JOB_SUPPORT, 0, true);
+        break;
     case ACT_CONCURRENCY:
         if (!a.job && (id == 1 || id == 5 || id == 10)) {
             a.concurrency = (unsigned)id;
@@ -1239,6 +1304,7 @@ static void perform(int action, uint64_t id) {
         start_job(JOB_GH_CONNECT, 0, false);
         break;
     case ACT_DISCONNECT: {
+        update_cleanup();
         char e[1024] = {0};
         if (storage_commit(&a.storage, &a.library, &a.library, "", a.storage.ai_key, e)) {
             edit_set(a.ghkey, "");
@@ -1337,7 +1403,7 @@ static void perform(int action, uint64_t id) {
     }
     case ACT_CANCEL:
 
-        if (a.job && a.job->kind != JOB_STAR) {
+        if (a.job && a.job->kind != JOB_STAR && a.job->kind != JOB_SUPPORT) {
             SetEvent(a.job->cancel);
             notice("正在取消，等待当前网络步骤返回…", true);
         }
@@ -1768,6 +1834,7 @@ static LRESULT CALLBACK window_proc(HWND window, UINT msg, WPARAM wp, LPARAM lp)
 
                     discovered = j->kind == JOB_DISCOVER;
                     if (kind == JOB_GH_CONNECT) {
+                        a.update_checked = 0;
                         edit_set(a.ghkey, "");
                         notice("GitHub 已连接。", false);
                     } else if (kind == JOB_PROFILE) {
@@ -1808,6 +1875,8 @@ static LRESULT CALLBACK window_proc(HWND window, UINT msg, WPARAM wp, LPARAM lp)
         return 0;
     }
     case WM_TIMER:
+        if (wp == 6 && a.page == PAGE_SETTINGS)
+            update_start();
         if (wp == 5) {
             KillTimer(window, 5);
             if (a.settings_dirty && !a.job)
@@ -1858,14 +1927,14 @@ static LRESULT CALLBACK window_proc(HWND window, UINT msg, WPARAM wp, LPARAM lp)
         return 0;
     case WM_CLOSE:
         if (a.job) {
-            const wchar_t *question = a.job->kind == JOB_STAR
+            const wchar_t *question = a.job->kind == JOB_STAR || a.job->kind == JOB_SUPPORT
                                           ? L"GitHub Star 写入尚未完成。等待操作返回后退出？"
                                           : L"后台任务尚未完成。请求取消并在任务返回后退出？";
             if (MessageBoxW(window, question, APP_NAME, MB_YESNO | MB_ICONQUESTION) != IDYES)
                 return 0;
             /* MessageBox pumps WM_JOB: the task may finish while it is open. */
             if (a.job) {
-                if (a.job->kind != JOB_STAR)
+                if (a.job->kind != JOB_STAR && a.job->kind != JOB_SUPPORT)
                     SetEvent(a.job->cancel);
                 a.close_after_job = true;
                 notice("正在结束后台任务…", true);
@@ -1877,7 +1946,17 @@ static LRESULT CALLBACK window_proc(HWND window, UINT msg, WPARAM wp, LPARAM lp)
         DestroyWindow(window);
         return 0;
     case WM_DESTROY:
+        update_cleanup();
         PostQuitMessage(0);
+        return 0;
+    case WM_UPDATE:
+        if (a.update && (UpdateCheck *)lp == a.update) {
+            if (a.update->ok)
+                strcpy_s(a.latest, sizeof(a.latest), a.update->latest);
+            a.update_checked = GetTickCount64();
+            update_cleanup();
+            redraw();
+        }
         return 0;
     }
     return DefWindowProcW(window, msg, wp, lp);
@@ -2031,8 +2110,13 @@ int ui_run(HINSTANCE instance, int show, const wchar_t *command) {
         const char *demo =
             "{\"narrative\":["
             "{\"text\":"
-            "\"你似乎在意日常与自己之间的距离：当重复的事情变得顺手，注意力便有机会回到真正想做的事上。这些收藏让人想到，你寻找的也许不只是方便，还有一种能够亲自安排节奏的自主感。\",\"evidence\":[1001,1003,1005]},"
-            "{\"text\":\"另一条线索，是愿意走近事物的结构，把零散的东西整理成可以理解和改动的秩序。秩序为尝试提供落脚处，却也可能让陌生的可能暂时留在门外。当手边的一切已经足够顺畅，你会把腾出的时间交给更深的理解，还是一个还说不出用途的新念头？\",\"evidence\":[1002,1004]}],"
+            "\"你似乎在意日常与自己之间的距离：当重复的事情变得顺手，注意力便有机会回到真正想做的事上。这些收"
+            "藏让人想到，你寻找的也许不只是方便，还有一种能够亲自安排节奏的自主感。\",\"evidence\":[1001,"
+            "1003,1005]},"
+            "{\"text\":"
+            "\"另一条线索，是愿意走近事物的结构，把零散的东西整理成可以理解和改动的秩序。秩序为尝试提供落脚处"
+            "，却也可能让陌生的可能暂时留在门外。当手边的一切已经足够顺畅，你会把腾出的时间交给更深的理解，还"
+            "是一个还说不出用途的新念头？\",\"evidence\":[1002,1004]}],"
             "\"classifications\":["
             "{\"id\":1001,\"sufficient\":true,\"axes\":[]},"
             "{\"id\":1002,\"sufficient\":true,\"axes\":[{\"dimension\":1,\"reason\":\"C 语言 JSON "
@@ -2130,6 +2214,8 @@ int ui_run(HINSTANCE instance, int show, const wchar_t *command) {
     if (a.storage.recovered)
         notice("已恢复本地星库；旧文件和备份已保留。", true);
     SetTimer(a.window, 1, 1000, NULL);
+    if (!a.test_preview)
+        SetTimer(a.window, 6, 2000, NULL);
     if (*a.capture)
         SetTimer(a.window, 2, 1200, NULL);
     if (*a.ui_test_report)
@@ -2323,7 +2409,8 @@ static void run_ui_tests(void) {
         profile_commands += a.targets[i].action == ACT_PROFILE;
     char *reflection = profile_reflection(jget(root(&a.library), "profile"));
     ui_check(&report, "portrait has one update command and one connected paragraph",
-             profile_commands == 1 && reflection && !strchr(reflection, '\n') && !strstr(reflection, "Pulse"));
+             profile_commands == 1 && reflection && !strchr(reflection, '\n') &&
+                 !strstr(reflection, "Pulse"));
     mem_free(reflection);
     perform(ACT_DIMENSION, 1);
     paint();
@@ -2395,6 +2482,18 @@ static void run_ui_tests(void) {
     scroll_by(400);
     paint();
     ui_check(&report, "settings scroll remains usable", a.setting_scroll > 0 && a.scroll_limit > 0);
+    paint();
+    ui_check(&report, "settings expose Release and explicit Star me actions",
+             target_index(ACT_RELEASE, 0) >= 0 && target_index(ACT_STAR_ME, 0) >= 0);
+    update_start();
+    ui_check(&report, "isolated previews never check real releases", a.update == NULL);
+    a.update = mem_alloc(sizeof(*a.update));
+    a.update->cancel = CreateEventW(NULL, TRUE, FALSE, NULL);
+    a.update->ok = true;
+    strcpy_s(a.update->latest, 32, "v0.0.6");
+    SendMessageW(a.window, WM_UPDATE, 0, (LPARAM)a.update);
+    ui_check(&report, "new version result reaches settings and releases worker state",
+             !a.update && version_newer(a.latest, APP_VERSION));
     a.settings_dirty = false;
     set_page(PAGE_DISCOVER);
     preview_discoveries();
@@ -2457,8 +2556,9 @@ static void run_ui_tests(void) {
     Library restarted = {0};
     bool restart_ok = storage_load(&isolated, &restarted, save_error);
     ui_check(&report, "restart restores saved repositories and profile",
-             restart_ok && yyjson_mut_arr_size(jget(root(&restarted), "repos")) ==
-                               yyjson_mut_arr_size(jget(root(&a.library), "repos")) &&
+             restart_ok &&
+                 yyjson_mut_arr_size(jget(root(&restarted), "repos")) ==
+                     yyjson_mut_arr_size(jget(root(&a.library), "repos")) &&
                  !strcmp(jstr(jget(root(&restarted), "profile"), "summary"),
                          jstr(jget(root(&a.library), "profile"), "summary")));
     if (restart_ok) {

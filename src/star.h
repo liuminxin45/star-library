@@ -11,7 +11,7 @@
 #include "yyjson.h"
 
 #define APP_NAME L"Star Library"
-#define APP_VERSION "0.0.4"
+#define APP_VERSION "0.0.5"
 #define PROFILE_STYLE "reflective-v1"
 #define MAX_BODY (32u * 1024u * 1024u)
 #define MAX_REPOS 50000u
@@ -19,6 +19,8 @@
 #define WM_PROGRESS (WM_APP + 2)
 #define WM_BATCH (WM_APP + 3)
 #define WM_AVATAR (WM_APP + 4)
+#define WM_UPDATE (WM_APP + 5)
+#define PROJECT_URL L"https://github.com/liuminxin45/star-library"
 
 typedef yyjson_mut_val J;
 typedef struct {
@@ -57,9 +59,22 @@ typedef struct {
     uint64_t repo_id, base_revision;
     bool desired_star, ok, discovery_summary;
     unsigned completed, batches, retry_count, insufficient;
+    unsigned output_limit, output_parameter;
+    uint64_t input_tokens, output_tokens;
+    DWORD ai_status;
+    bool usage_known, context_limited, unsupported_output;
     char error[1024];
 } Job;
-enum { JOB_SYNC = 1, JOB_PROFILE, JOB_DISCOVER, JOB_STAR, JOB_AI_TEST, JOB_GH_CONNECT, JOB_SUMMARY };
+enum {
+    JOB_SYNC = 1,
+    JOB_PROFILE,
+    JOB_DISCOVER,
+    JOB_STAR,
+    JOB_AI_TEST,
+    JOB_GH_CONNECT,
+    JOB_SUMMARY,
+    JOB_SUPPORT
+};
 
 void *mem_alloc(size_t n);
 void *mem_resize(void *p, size_t n);
@@ -101,6 +116,9 @@ bool profile_validate_value(Library *lib, J *profile, char *error);
 char *profile_reflection(J *profile);
 bool text_mentions_repo(const char *text, J *repo);
 unsigned dimension_mask(J *dimensions);
+uint64_t discovery_weight(Library *lib, J *repo);
+bool version_newer(const char *candidate, const char *current);
+bool update_latest(const char *token, HANDLE cancel, char latest[32]);
 bool discovery_accept(Library *lib, J *candidates, const char *json, char *error);
 void library_demo(Library *lib);
 extern const char *dimension_names[6];

@@ -9,6 +9,7 @@ static int failures, checks, requests, mode;
 static LONG summary_fixture_calls;
 static LONG classification_fixture_calls;
 static LONG parallel_live, parallel_peak, parallel_started, private_seen;
+static unsigned budget_calls, budget_max_items, budget_seen[5];
 static unsigned parallel_limit;
 static HANDLE parallel_barrier;
 static uint64_t parallel_failed_id;
@@ -96,7 +97,10 @@ static char *fixture_selections(const Request *req) {
         buf_add(&answer, ",\"profile_dimensions\":");
         buf_add(&answer, dimensions ? dimensions : "[]");
         free(dimensions);
-        buf_add(&answer, ",\"summary\":\"面向 Windows 的实用工具。\",\"reason\":\"关联动手构建、效率偏好和信息秩序，具体功能以项目描述为依据。\"}");
+        buf_add(
+            &answer,
+            ",\"summary\":\"面向 Windows "
+            "的实用工具。\",\"reason\":\"关联动手构建、效率偏好和信息秩序，具体功能以项目描述为依据。\"}");
     }
     buf_add(&answer, "]}");
     yyjson_doc_free(packet);
@@ -122,20 +126,19 @@ static char *fixture_analysis(const Request *req, bool summaries) {
     yyjson_doc *packet = yyjson_read(input, strlen(input), 0);
     CHECK(packet != NULL);
     Buffer b = {0};
-    buf_add(&b, summaries ? "{\"summaries\":[" : "{\"classifications\":[");
+    buf_add(&b, summaries ? "{\"items\":[" : "{\"classifications\":[");
     size_t i, n;
     yyjson_val *r;
     yyjson_arr_foreach(yyjson_doc_get_root(packet), i, n, r) {
         if (i)
             buf_add(&b, ",");
         uint64_t id = yyjson_get_uint(yyjson_obj_get(r, "id"));
-        const char *description = yyjson_get_str(yyjson_obj_get(r, "description"));
-        bool material = (description && *description) || yyjson_arr_size(yyjson_obj_get(r, "topics"));
+        const char *description = yyjson_get_str(yyjson_obj_get(r, "d"));
+        bool material = (description && *description) || yyjson_arr_size(yyjson_obj_get(r, "t"));
         buf_add(&b, "{\"id\":");
         buf_num(&b, id);
         if (summaries) {
-            buf_add(&b, material ? ",\"summary\":\"用于本机桌面与开发工作的工具。\",\"status\":\"ready\"}"
-                                 : ",\"summary\":\"资料不足\",\"status\":\"insufficient\"}");
+            buf_add(&b, material ? ",\"s\":\"用于本机桌面与开发工作的工具。\"}" : ",\"s\":null}");
         } else
             buf_add(&b, material ? ",\"sufficient\":true,\"axes\":[{\"dimension\":1,\"reason\":"
                                    "\"固定资料中的开发工具用途。\"}]}"
@@ -157,6 +160,56 @@ static bool fixture(const Request *req, Response *res, HANDLE cancel) {
     }
     memset(res, 0, sizeof(*res));
     res->status = 200;
+    if (mode >= 60 && mode <= 65 && req->body && strstr(req->body, "任务：中文项目概括")) {
+        budget_calls++;
+        yyjson_doc *d = yyjson_read(req->body, strlen(req->body), 0);
+        yyjson_val *r = yyjson_doc_get_root(d);
+        if (strstr(req->url, "api.deepseek.com"))
+            CHECK(!strcmp(yyjson_get_str(yyjson_obj_get(yyjson_obj_get(r, "thinking"), "type")), "disabled"));
+        yyjson_val *messages = yyjson_obj_get(r, "messages");
+        const char *text = yyjson_get_str(yyjson_obj_get(yyjson_arr_get(messages, 1), "content"));
+        yyjson_doc *input = yyjson_read(text, strlen(text), 0);
+        size_t count = yyjson_arr_size(yyjson_doc_get_root(input));
+        if (count > budget_max_items)
+            budget_max_items = (unsigned)count;
+        CHECK(count > 0 && count <= 20);
+        CHECK(!strstr(text, "description") && !strstr(text, "tags") && !strstr(text, "avatar_url"));
+        yyjson_val *cap = yyjson_obj_get(r, "max_tokens");
+        if (!cap)
+            cap = yyjson_obj_get(r, "max_completion_tokens");
+        CHECK(yyjson_get_uint(cap) > 0 && yyjson_get_uint(cap) <= 3072);
+        size_t i, n;
+        yyjson_val *item;
+        yyjson_arr_foreach(yyjson_doc_get_root(input), i, n, item) {
+            uint64_t id = yyjson_get_uint(yyjson_obj_get(item, "id"));
+            if (id >= 1001 && id <= 1005)
+                budget_seen[id - 1001]++;
+        }
+        bool context = mode == 62 && count > 2;
+        bool parameter = mode == 63 && yyjson_obj_get(r, "max_tokens");
+        yyjson_doc_free(input);
+        yyjson_doc_free(d);
+        if (context || parameter || mode == 64) {
+            res->status = mode == 64 ? 429 : 400;
+            res->body = str_copy(context ? "{\"error\":{\"code\":\"context_length_exceeded\"}}"
+                                         : "{\"error\":{\"message\":\"unsupported max_tokens\"}}");
+            error_set(res->error, sizeof(res->error), "fixture request rejected");
+            return false;
+        }
+        char *normal = fixture_analysis(req, true);
+        const char *answer = mode == 61 && budget_calls == 1
+                                 ? "{\"items\":[{\"id\":1001,\"s\":\"原生桌面工具。\"},{\"id\":"
+                             : mode == 65 ? "{\"items\":[]}"
+                                          : normal;
+        Buffer b = {0};
+        buf_add(&b, "{\"usage\":{\"prompt_tokens\":300,\"completion_tokens\":100},\"choices\":[{\"message\":{"
+                    "\"content\":");
+        buf_json_string(&b, answer);
+        buf_add(&b, "}}]}");
+        mem_free(normal);
+        res->body = b.data;
+        return true;
+    }
     if (mode >= 40 && mode <= 44 && req->body &&
         (strstr(req->body, "任务：中文项目概括") || strstr(req->body, "任务：收藏兴趣分类"))) {
         LONG ordinal = InterlockedIncrement(&parallel_started), live = InterlockedIncrement(&parallel_live),
@@ -216,6 +269,18 @@ static bool fixture(const Request *req, Response *res, HANDLE cancel) {
         res->body = str_copy(mode == 8 ? "{\"login\":\"other\"}" : "{\"login\":\"preview\"}");
         return true;
     }
+    if (strstr(req->url, "/releases/latest")) {
+        res->body = str_copy(mode == 71   ? "{\"tag_name\":\"v0.0.6\",\"prerelease\":true}"
+                             : mode == 72 ? "{\"tag_name\":\"https://evil.example\"}"
+                                          : "{\"tag_name\":\"v0.0.6\",\"draft\":false}");
+        return true;
+    }
+    if (!strcmp(req->url, "https://api.github.com/repos/liuminxin45/star-library")) {
+        res->body =
+            str_copy("{\"id\":1430840985,\"full_name\":\"liuminxin45/star-library\",\"description\":\"GitHub "
+                     "Stars manager\",\"topics\":[],\"stargazers_count\":100}");
+        return true;
+    }
     if (strstr(req->url, "/starred?")) {
         Buffer b = {0};
         buf_add(&b, "[{\"starred_at\":\"2026-10-23T00:00:00Z\",\"repo\":");
@@ -255,6 +320,7 @@ static bool fixture(const Request *req, Response *res, HANDLE cancel) {
         return true;
     }
     if (strstr(req->url, "search/repositories")) {
+        CHECK(strstr(req->url, "stars%3A%3E%3D100") && strstr(req->url, "sort=stars&order=desc"));
         discovery_searches++;
         int route = strstr(req->url, "desktop") ? 1 : strstr(req->url, "creative") ? 2 : 0;
         if (mode == DISC_SEARCH_FAIL && route == 2) {
@@ -271,6 +337,8 @@ static bool fixture(const Request *req, Response *res, HANDLE cancel) {
                     "{\"id\":9998,\"full_name\":\"example/"
                     "archived\",\"description\":\"archived\",\"archived\":true},"
                     "{\"id\":9997,\"full_name\":\"example/no-evidence\",\"description\":\"\",\"topics\":[]}");
+            buf_add(&b, ",{\"id\":9996,\"full_name\":\"example/below-threshold\",\"description\":\"desktop "
+                        "tool\",\"stargazers_count\":99}");
             if (route)
                 buf_add(&b, ",{\"id\":10000,\"full_name\":\"example/duplicate\",\"description\":\"Windows "
                             "utility\"}");
@@ -281,11 +349,11 @@ static bool fixture(const Request *req, Response *res, HANDLE cancel) {
                 buf_add(&b, ",\"full_name\":\"example/tool-");
                 buf_num(&b, id);
                 buf_add(&b, "\",\"description\":\"Windows "
-                            "utility\",\"topics\":[\"desktop\"],\"stargazers_count\":17}");
+                            "utility\",\"topics\":[\"desktop\"],\"stargazers_count\":100}");
             }
         } else if (mode != DISC_EMPTY) {
             buf_add(&b, "{\"id\":9991,\"full_name\":\"example/native-tool\",\"description\":\"Windows "
-                        "utility\",\"topics\":[],\"stargazers_count\":17,\"language\":\"C\"}");
+                        "utility\",\"topics\":[],\"stargazers_count\":100,\"language\":\"C\"}");
         }
         buf_add(&b, "]}");
         res->body = b.data;
@@ -312,14 +380,14 @@ static bool fixture(const Request *req, Response *res, HANDLE cancel) {
             yyjson_val *dimensions = yyjson_obj_get(yyjson_doc_get_root(context), "dimensions"), *axis;
             unsigned choices[6] = {0}, choice_count = 0;
             size_t di, dn;
-            yyjson_arr_foreach(dimensions, di, dn, axis)
-                if (yyjson_get_uint(yyjson_obj_get(axis, "count")))
-                    choices[choice_count++] = (unsigned)di;
+            yyjson_arr_foreach(dimensions, di, dn, axis) if (yyjson_get_uint(yyjson_obj_get(axis, "count")))
+                choices[choice_count++] = (unsigned)di;
             CHECK(yyjson_arr_size(dimensions) == 6 && choice_count > 0);
             Buffer plan = {0};
             buf_add(&plan, "{\"queries\":[");
             for (int k = 0; k < (mode == DISC_SHORT_QUERY ? 1 : 3); k++) {
-                if (k) buf_add(&plan, ",");
+                if (k)
+                    buf_add(&plan, ",");
                 buf_add(&plan, "{\"query\":");
                 const char *query[] = {"native windows archived:false", "desktop data archived:false",
                                        "creative tools archived:false"};
@@ -331,8 +399,8 @@ static bool fixture(const Request *req, Response *res, HANDLE cancel) {
                 const char *intent[] = {"尝试可改造的小工具", "组织日常重复操作", "探索知识组织的新用途"};
                 buf_json_string(&plan, intent[k]);
                 buf_add(&plan, ",\"dimensions\":[");
-                unsigned choice = choices[(mode == DISC_COVERAGE && k == 2 ? 0 : k) %
-                                          (choice_count ? choice_count : 1)];
+                unsigned choice =
+                    choices[(mode == DISC_COVERAGE && k == 2 ? 0 : k) % (choice_count ? choice_count : 1)];
                 buf_num(&plan, mode == DISC_BAD_DIMENSION    ? 99
                                : mode == DISC_ZERO_DIMENSION ? 3
                                : mode == DISC_NARROW_PLAN    ? 1
@@ -394,8 +462,14 @@ static bool fixture(const Request *req, Response *res, HANDLE cancel) {
             answer =
                 "{\"summary\":\"关注原生工具与数据整理。\",\"interests\":[{\"name\":\"Windows\",\"reason\":"
                 "\"桌面工具的描述。\",\"confidence\":\"medium\",\"evidence\":[1001]}],\"preferences\":[],"
-                "\"narrative\":[{\"text\":\"你似乎在意日常与自己之间的距离：当重复的事情变得顺手，注意力便有机会回到真正想做的事上。这些收藏让人想到，你寻找的也许不只是方便，还有一种能够亲自安排节奏的自主感。\",\"evidence\":[1001]},"
-                "{\"text\":\"另一条线索，是愿意走近事物的结构，把零散的东西整理成可以理解和改动的秩序。秩序为尝试提供落脚处，却也可能让陌生的可能暂时留在门外。当手边的一切已经足够顺畅，你会把腾出的时间交给更深的理解，还是一个还说不出用途的新念头？\",\"evidence\":[1002]}]}";
+                "\"narrative\":[{\"text\":"
+                "\"你似乎在意日常与自己之间的距离：当重复的事情变得顺手，注意力便有机会回到真正想做的事上。这"
+                "些收藏让人想到，你寻找的也许不只是方便，还有一种能够亲自安排节奏的自主感。\",\"evidence\":["
+                "1001]},"
+                "{\"text\":"
+                "\"另一条线索，是愿意走近事物的结构，把零散的东西整理成可以理解和改动的秩序。秩序为尝试提供落"
+                "脚处，却也可能让陌生的可能暂时留在门外。当手边的一切已经足够顺畅，你会把腾出的时间交给更深的"
+                "理解，还是一个还说不出用途的新念头？\",\"evidence\":[1002]}]}";
             if (mode == 34)
                 answer = "{\"summary\":\"无依据\",\"interests\":[],\"preferences\":[],\"narrative\":[{"
                          "\"text\":\"断言\",\"evidence\":[999999]}]}";
@@ -517,7 +591,8 @@ static void test_discovery(Library *base) {
     jset(&l, p, "classifications", classes);
     jtext(&l, p, "source_stamp", "0000000000000000");
     jnumber(&l, p, "source_version", 2);
-    const char *parts = "[{\"text\":\"你似乎喜欢亲手改变日常。\",\"evidence\":[1001]},{\"text\":\"也愿意为新的可能留些位置。\",\"evidence\":[1002]}]";
+    const char *parts = "[{\"text\":\"你似乎喜欢亲手改变日常。\",\"evidence\":[1001]},{\"text\":"
+                        "\"也愿意为新的可能留些位置。\",\"evidence\":[1002]}]";
     yyjson_doc *pd = yyjson_read(parts, strlen(parts), 0);
     jset(&l, p, "narrative", yyjson_val_mut_copy(l.doc, yyjson_doc_get_root(pd)));
     yyjson_doc_free(pd);
@@ -550,7 +625,7 @@ static void test_discovery(Library *base) {
     for (int k = 0; k < 6; k++)
         CHECK(!strcmp(jstr(yyjson_mut_arr_get(arr, k), "discovery_lane"), expected[k]));
     CHECK(!find_candidate(&job.library, 1001) && !find_candidate(&job.library, 9998) &&
-          !find_candidate(&job.library, 9997));
+          !find_candidate(&job.library, 9997) && !find_candidate(&job.library, 9996));
     CHECK(!strcmp(jstr(find_repo(&job.library, 1001), "note"), jstr(find_repo(base, 1001), "note")));
     CHECK(library_validate(&job.library, error));
     CHECK(library_clone(&curated, &job.library));
@@ -562,6 +637,17 @@ static void test_discovery(Library *base) {
     mem_free(curated_json);
     library_free(&restored);
 
+    for (int auth = 0; auth < 2; auth++) {
+        mode = auth ? 8 : 30;
+        reset_discovery_fixture();
+        init_job(&job, &curated, JOB_DISCOVER);
+        char *unchanged = library_json(&job.library, &len);
+        CHECK(!run_job(&job) && discovery_searches == 0 && discovery_ai == 0);
+        check_unchanged(&job.library, unchanged);
+        mem_free(unchanged);
+        drop_job(&job);
+    }
+    mode = DISC_BALANCED;
     Library excluded = {0};
     CHECK(library_clone(&excluded, &l));
     J *owned = jclone(&excluded, find_repo(&excluded, 1001));
@@ -924,7 +1010,7 @@ static void test_parallel_and_avatars(Library *base) {
         CHECK(ai_concurrency(&l) == limit);
         for (int kind = 0; kind < 2; kind++) {
             parallel_live = parallel_peak = parallel_started = private_seen = 0;
-            parallel_limit = kind && limit > 5 ? 5 : limit;
+            parallel_limit = limit;
             parallel_barrier = CreateEventW(NULL, TRUE, FALSE, NULL);
             mode = 40;
             Job j;
@@ -933,7 +1019,7 @@ static void test_parallel_and_avatars(Library *base) {
             CHECK(parallel_peak == (LONG)parallel_limit && parallel_live == 0);
             CHECK(private_seen == 1);
             CHECK(j.completed == 200);
-            CHECK(parallel_started == (kind ? 5 : 10));
+            CHECK(kind ? parallel_started >= 10 : parallel_started == 10);
             if (!kind) {
                 CHECK(summary_current(find_repo(&j.library, 8000)));
                 CHECK(j.batches == 10);
@@ -953,10 +1039,10 @@ static void test_parallel_and_avatars(Library *base) {
         mode = fault;
         Job j;
         init_job(&j, &l, JOB_SUMMARY);
-        CHECK(!run_job(&j));
-        CHECK(parallel_started == (fault == 43 ? 10 : 5) && parallel_live == 0);
-        CHECK(j.completed == (fault == 42 ? 0u : fault == 43 ? 180u : 80u));
-        CHECK(!summary_current(find_repo(&j.library, parallel_failed_id)));
+        CHECK(run_job(&j) == (fault == 43));
+        CHECK((fault == 43 ? parallel_started > 10 : parallel_started == 5) && parallel_live == 0);
+        CHECK(j.completed == (fault == 42 ? 0u : fault == 43 ? 200u : 80u));
+        CHECK(summary_current(find_repo(&j.library, parallel_failed_id)) == (fault == 43));
         drop_job(&j);
         CloseHandle(parallel_barrier);
     }
@@ -1299,7 +1385,7 @@ static void test_profile_resume(void) {
     mode = 46;
     classification_fixture_calls = 0;
     init_job(&j, &l, JOB_PROFILE);
-    CHECK(run_job(&j) && classification_fixture_calls == 3 && j.completed == 2 && j.retry_count == 93);
+    CHECK(run_job(&j) && classification_fixture_calls > 3 && j.completed == 2 && j.retry_count == 93);
     drop_job(&j);
     size_t i, n;
     yyjson_mut_arr_foreach(jget(root(&l), "repos"), i, n, r) jtext(&l, r, "description", "");
@@ -1309,6 +1395,95 @@ static void test_profile_resume(void) {
     CHECK(!run_job(&j) && j.completed == 95 && j.insufficient == 95 && requests == prior);
     drop_job(&j);
     library_free(&l);
+}
+static void test_token_budgets(void) {
+    Library l = {0};
+    network_transport = fixture;
+    library_new(&l);
+    library_demo(&l);
+    CHECK(version_newer("v0.0.6", "0.0.5") && version_newer("0.10.0", "0.9.9"));
+    CHECK(!version_newer("0.0.5", "0.0.5") && !version_newer("0.0.4", "0.0.5"));
+    CHECK(!version_newer("9.0.0-rc1", "0.0.5") && !version_newer("https://evil.example", "0.0.5"));
+    char latest[32] = {0};
+    mode = 0;
+    CHECK(!update_latest("", NULL, latest));
+    CHECK(update_latest("fixture-token", NULL, latest) && !strcmp(latest, "v0.0.6"));
+    mode = 71;
+    CHECK(!update_latest("fixture-token", NULL, latest));
+    mode = 72;
+    CHECK(!update_latest("fixture-token", NULL, latest));
+    mode = 0;
+    Job support;
+    init_job(&support, &l, JOB_SUPPORT);
+    CHECK(run_job(&support) && jbool(find_repo(&support.library, 1430840985), "active"));
+    CHECK(!find_candidate(&support.library, 1430840985));
+    drop_job(&support);
+    J *candidate = find_repo(&l, 1001);
+    jnumber(&l, candidate, "stars", 500);
+    J *topic = yyjson_mut_arr(l.doc);
+    yyjson_mut_arr_append(topic, yyjson_mut_strcpy(l.doc, "desktop"));
+    jset(&l, candidate, "topics", topic);
+    uint64_t weight = discovery_weight(&l, candidate);
+    J *feedback = yyjson_mut_obj(l.doc);
+    jnumber(&l, feedback, "id", 888888);
+    jtext(&l, feedback, "state", "ignored");
+    jset(&l, feedback, "repo", jclone(&l, candidate));
+    yyjson_mut_arr_append(jget(root(&l), "feedback"), feedback);
+    CHECK(discovery_weight(&l, candidate) < weight);
+    uint64_t lower = discovery_weight(&l, candidate);
+    jnumber(&l, candidate, "stars", 1000);
+    CHECK(discovery_weight(&l, candidate) > lower);
+    jtext(&l, feedback, "state", "later");
+    CHECK(discovery_weight(&l, candidate) == 1000);
+    jtext(&l, jget(root(&l), "settings"), "ai_url", "https://model.example");
+    jtext(&l, jget(root(&l), "settings"), "ai_model", "fixture");
+    jnumber(&l, jget(root(&l), "settings"), "ai_concurrency", 1);
+    for (mode = 60; mode <= 65; mode++) {
+        budget_calls = budget_max_items = 0;
+        memset(budget_seen, 0, sizeof(budget_seen));
+        Job j;
+        init_job(&j, &l, JOB_SUMMARY);
+        CHECK(run_job(&j) == (mode != 64 && mode != 65));
+        CHECK(j.completed == (mode == 64 || mode == 65 ? 0u : 5u));
+        if (mode == 60)
+            CHECK(budget_calls == 1 && budget_max_items == 5 && j.usage_known);
+        if (mode == 61)
+            CHECK(budget_calls > 1 && budget_seen[0] == 1);
+        if (mode == 62) {
+            CHECK(budget_calls > 1 &&
+                  jnum(jget(jget(root(&j.library), "settings"), "ai_budget"), "context") == 4096);
+        }
+        if (mode == 63) {
+            CHECK(budget_calls == 2);
+            CHECK(jnum(jget(jget(root(&j.library), "settings"), "ai_budget"), "parameter") == 1);
+        }
+        if (mode == 64)
+            CHECK(budget_calls == 1);
+        if (mode == 65)
+            for (unsigned k = 0; k < 5; k++)
+                CHECK(budget_seen[k] == 3);
+        drop_job(&j);
+    }
+    mode = 60;
+    J *repo;
+    size_t i, n;
+    Buffer long_text = {0};
+    for (unsigned k = 0; k < 800; k++)
+        buf_add(&long_text, "开发工具");
+    yyjson_mut_arr_foreach(jget(root(&l), "repos"), i, n, repo)
+        jtext(&l, repo, "description", long_text.data);
+    buf_drop(&long_text);
+    budget_calls = budget_max_items = 0;
+    Job j;
+    init_job(&j, &l, JOB_SUMMARY);
+    CHECK(run_job(&j) && j.completed == 5 && budget_calls > 1 && budget_max_items < 5);
+    drop_job(&j);
+    jtext(&l, jget(root(&l), "settings"), "ai_url", "https://api.deepseek.com");
+    init_job(&j, &l, JOB_SUMMARY);
+    CHECK(run_job(&j));
+    drop_job(&j);
+    library_free(&l);
+    mode = 0;
 }
 static void test_endpoints_and_partial_results(void) {
     const char *inputs[] = {"https://model.example",
@@ -1597,6 +1772,7 @@ int main(int argc, char **argv) {
         }
         return all_ok ? 0 : 1;
     }
+    test_token_budgets();
     test_endpoints_and_partial_results();
     test_profile_resume();
     test_storage_restart();
@@ -1707,7 +1883,7 @@ int main(int argc, char **argv) {
     init_job(&job, &large, JOB_PROFILE);
     int prior_requests = requests;
     CHECK(run_job(&job));
-    CHECK(requests - prior_requests == 5);
+    CHECK(requests - prior_requests > 5 && requests - prior_requests < 126);
     CHECK(library_validate(&job.library, error));
     drop_job(&job);
     library_free(&large);

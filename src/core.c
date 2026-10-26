@@ -240,6 +240,64 @@ unsigned dimension_mask(J *dimensions) {
     }
     return mask;
 }
+static bool read_version(const char *text, unsigned parts[3]) {
+    if (*text == 'v')
+        text++;
+    for (unsigned k = 0; k < 3; k++) {
+        if (*text < '0' || *text > '9')
+            return false;
+        unsigned n = 0;
+        while (*text >= '0' && *text <= '9') {
+            if (n > 99999)
+                return false;
+            n = n * 10 + (unsigned)(*text++ - '0');
+        }
+        parts[k] = n;
+        if (k < 2 && *text++ != '.')
+            return false;
+    }
+    return !*text;
+}
+bool version_newer(const char *candidate, const char *current) {
+    unsigned a[3], b[3];
+    if (!read_version(candidate, a) || !read_version(current, b))
+        return false;
+    for (unsigned k = 0; k < 3; k++)
+        if (a[k] != b[k])
+            return a[k] > b[k];
+    return false;
+}
+uint64_t discovery_weight(Library *l, J *repo) {
+    unsigned penalty = 0;
+    J *feedback;
+    size_t i, n;
+    J *items = jget(root(l), "feedback");
+    size_t total = yyjson_mut_arr_size(items);
+    for (size_t index = total; index && index + 100 > total; index--) {
+        feedback = yyjson_mut_arr_get(items, index - 1);
+        if (strcmp(jstr(feedback, "state"), "ignored"))
+            continue;
+        unsigned shared = 0;
+        J *topic, *other;
+        size_t x, xn;
+        yyjson_mut_arr_foreach(jget(repo, "topics"), i, n, topic) {
+            yyjson_mut_arr_foreach(jget(jget(feedback, "repo"), "topics"), x, xn, other) {
+                if (!strcmp(yyjson_mut_get_str(topic), yyjson_mut_get_str(other))) {
+                    shared++;
+                    break;
+                }
+            }
+        }
+        if (shared >= 2)
+            penalty += shared;
+        else if (shared)
+            penalty++;
+    }
+    uint64_t stars = jnum(repo, "stars");
+    if (stars > 100000000)
+        stars = 100000000;
+    return stars * 100 / (100 + penalty * 60);
+}
 static bool discovery_fields_valid(J *r, bool required) {
     if (jget(r, "profile_dimensions") &&
         (!dimension_mask(jget(r, "profile_dimensions")) || !valid_text(r, "search_intent", 600) ||
@@ -496,12 +554,10 @@ bool profile_validate_value(Library *l, J *p, char *e) {
         goto bad;
     if (!strcmp(jstr(p, "narrative_style"), PROFILE_STYLE)) {
         char *reflection = profile_reflection(p);
-        bool valid = reflection && strlen(reflection) <= 2400 &&
-                     !strpbrk(reflection, "0123456789/%\r\n");
+        bool valid = reflection && strlen(reflection) <= 2400 && !strpbrk(reflection, "0123456789/%\r\n");
         J *repo;
-        yyjson_mut_arr_foreach(jget(root(l), "repos"), i, n, repo)
-            if (reflection && text_mentions_repo(reflection, repo))
-                valid = false;
+        yyjson_mut_arr_foreach(jget(root(l), "repos"), i, n,
+                               repo) if (reflection && text_mentions_repo(reflection, repo)) valid = false;
         mem_free(reflection);
         if (!valid)
             goto bad;
@@ -665,6 +721,18 @@ static J *ai_response_items(Library *l, const char *json, const char *key) {
 }
 J *summary_results(Library *l, J *batch, const char *json) {
     J *items = ai_response_items(l, json, "summaries"), *valid = yyjson_mut_arr(l->doc);
+    if (!items) {
+        items = ai_response_items(l, json, "items");
+        size_t k, count;
+        J *item;
+        yyjson_mut_arr_foreach(items, k, count, item) {
+            J *s = jget(item, "s");
+            if (yyjson_mut_is_str(s) || yyjson_mut_is_null(s)) {
+                jtext(l, item, "summary", yyjson_mut_is_null(s) ? "资料不足" : jstr(item, "s"));
+                jtext(l, item, "status", yyjson_mut_is_null(s) ? "insufficient" : "ready");
+            }
+        }
+    }
     size_t i, n;
     J *source;
     yyjson_mut_arr_foreach(batch, i, n, source) {
@@ -947,8 +1015,8 @@ bool discovery_accept(Library *l, J *candidates, const char *json, char *e) {
             candidate = r;
             break;
         }
-        if (!candidate || !valid_text(v, "reason", 4096) || !*jstr(v, "reason") ||
-            !discovery_association_valid(l, candidate, v))
+        if (!candidate || jnum(candidate, "stars") < 100 || !valid_text(v, "reason", 4096) ||
+            !*jstr(v, "reason") || !discovery_association_valid(l, candidate, v))
             goto bad;
         /* Validate on a clone: partial answers never alter candidates or the old batch. */
         J *item = jclone(l, candidate);
