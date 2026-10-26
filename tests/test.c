@@ -29,7 +29,14 @@ enum {
     DISC_BAD_FINAL,
     DISC_SHORT_QUERY,
     DISC_DUP_QUERY,
-    DISC_BAD_QUERY
+    DISC_BAD_QUERY,
+    DISC_BAD_DIMENSION,
+    DISC_NARROW_PLAN,
+    DISC_PRIVATE_QUERY,
+    DISC_RATE_LIMIT,
+    DISC_COVERAGE,
+    DISC_DUP_DIMENSION,
+    DISC_ZERO_DIMENSION
 };
 static int discovery_searches, discovery_ai, pool_count, pool_routes[3];
 static void reset_discovery_fixture(void) {
@@ -49,6 +56,11 @@ static char *fixture_selections(const Request *req) {
     yyjson_val *candidates = yyjson_obj_get(yyjson_doc_get_root(packet), "candidates"), *v;
     uint64_t ids[6] = {0};
     const char *lanes[6] = {0};
+    yyjson_val *axes[6] = {0};
+    yyjson_val *context = yyjson_obj_get(yyjson_doc_get_root(packet), "profile");
+    CHECK(yyjson_arr_size(yyjson_obj_get(context, "dimensions")) == 6);
+    CHECK(yyjson_is_arr(yyjson_obj_get(context, "not_interested")));
+    CHECK(yyjson_get_len(yyjson_obj_get(context, "portrait")) > 0);
     int core = 0, adjacent = 0, selected = 0;
     size_t i, n;
     pool_count = (int)yyjson_arr_size(candidates);
@@ -62,6 +74,7 @@ static char *fixture_selections(const Request *req) {
         if ((is_core && core == 4) || (!is_core && adjacent == 2))
             continue;
         ids[selected] = id;
+        axes[selected] = yyjson_obj_get(v, "profile_dimensions");
         lanes[selected++] = lane;
         if (is_core)
             core++;
@@ -79,8 +92,11 @@ static char *fixture_selections(const Request *req) {
                 ",\"hook\":\"试一试 Windows "
                 "小工具\",\"try_idea\":\"查看项目介绍，选择其中一种用途进行尝试。\",\"discovery_lane\":");
         buf_json_string(&answer, lanes[k]);
-        buf_add(&answer, ",\"summary\":\"面向 Windows 的实用工具。\",\"reason\":\"与画像中的 Windows "
-                         "兴趣相关，具体功能以项目描述为依据。\"}");
+        char *dimensions = yyjson_val_write(axes[k], 0, NULL);
+        buf_add(&answer, ",\"profile_dimensions\":");
+        buf_add(&answer, dimensions ? dimensions : "[]");
+        free(dimensions);
+        buf_add(&answer, ",\"summary\":\"面向 Windows 的实用工具。\",\"reason\":\"关联动手构建、效率偏好和信息秩序，具体功能以项目描述为依据。\"}");
     }
     buf_add(&answer, "]}");
     yyjson_doc_free(packet);
@@ -288,14 +304,56 @@ static bool fixture(const Request *req, Response *res, HANDLE cancel) {
         if (strstr(req->body, "queries")) {
             CHECK(!strstr(req->body, "classifications") && !strstr(req->body, "source_stamp"));
             discovery_ai++;
-            answer = mode == DISC_SHORT_QUERY ? "{\"queries\":[\"native windows archived:false\"]}"
-                     : mode == DISC_DUP_QUERY ? "{\"queries\":[\"same\",\"same\",\"other\"]}"
-                     : mode == DISC_BAD_QUERY ? "{\"queries\":[\"REPO:evil/test\",\"desktop\",\"creative\"]}"
-                                              : "{\"queries\":[\"native windows archived:false\",\"desktop "
-                                                "data archived:false\",\"creative tools archived:false\"]}";
+            CHECK(!strstr(req->body, "\"tools\":") && !strstr(req->body, "web_search"));
+            yyjson_doc *rd = yyjson_read(req->body, strlen(req->body), 0);
+            yyjson_val *messages = yyjson_obj_get(yyjson_doc_get_root(rd), "messages");
+            const char *input = yyjson_get_str(yyjson_obj_get(yyjson_arr_get(messages, 1), "content"));
+            yyjson_doc *context = yyjson_read(input, strlen(input), 0);
+            yyjson_val *dimensions = yyjson_obj_get(yyjson_doc_get_root(context), "dimensions"), *axis;
+            unsigned choices[6] = {0}, choice_count = 0;
+            size_t di, dn;
+            yyjson_arr_foreach(dimensions, di, dn, axis)
+                if (yyjson_get_uint(yyjson_obj_get(axis, "count")))
+                    choices[choice_count++] = (unsigned)di;
+            CHECK(yyjson_arr_size(dimensions) == 6 && choice_count > 0);
+            Buffer plan = {0};
+            buf_add(&plan, "{\"queries\":[");
+            for (int k = 0; k < (mode == DISC_SHORT_QUERY ? 1 : 3); k++) {
+                if (k) buf_add(&plan, ",");
+                buf_add(&plan, "{\"query\":");
+                const char *query[] = {"native windows archived:false", "desktop data archived:false",
+                                       "creative tools archived:false"};
+                buf_json_string(&plan, mode == DISC_DUP_QUERY       ? "same"
+                                       : mode == DISC_BAD_QUERY     ? "REPO:evil/test"
+                                       : mode == DISC_PRIVATE_QUERY ? "secret-project"
+                                                                    : query[k]);
+                buf_add(&plan, ",\"intent\":");
+                const char *intent[] = {"尝试可改造的小工具", "组织日常重复操作", "探索知识组织的新用途"};
+                buf_json_string(&plan, intent[k]);
+                buf_add(&plan, ",\"dimensions\":[");
+                unsigned choice = choices[(mode == DISC_COVERAGE && k == 2 ? 0 : k) %
+                                          (choice_count ? choice_count : 1)];
+                buf_num(&plan, mode == DISC_BAD_DIMENSION    ? 99
+                               : mode == DISC_ZERO_DIMENSION ? 3
+                               : mode == DISC_NARROW_PLAN    ? 1
+                                                             : choice);
+                if (mode == DISC_DUP_DIMENSION)
+                    buf_add(&plan, ",1");
+                buf_add(&plan, "]}");
+            }
+            buf_add(&plan, "]}");
+            owned = plan.data;
+            answer = owned;
+            yyjson_doc_free(context);
+            yyjson_doc_free(rd);
         } else if (strstr(req->body, "recommendations")) {
             CHECK(!strstr(req->body, "classifications") && !strstr(req->body, "source_stamp"));
             discovery_ai++;
+            if (mode == DISC_RATE_LIMIT) {
+                res->status = 429;
+                error_set(res->error, sizeof(res->error), "fixture model rate limit");
+                return false;
+            }
             owned = fixture_selections(req);
             answer = owned;
             if (mode == 7)
@@ -336,8 +394,8 @@ static bool fixture(const Request *req, Response *res, HANDLE cancel) {
             answer =
                 "{\"summary\":\"关注原生工具与数据整理。\",\"interests\":[{\"name\":\"Windows\",\"reason\":"
                 "\"桌面工具的描述。\",\"confidence\":\"medium\",\"evidence\":[1001]}],\"preferences\":[],"
-                "\"narrative\":[{\"text\":\"你似乎愿意让桌面的工作更顺手。\",\"evidence\":[1001]},"
-                "{\"text\":\"数据读写库也留下了构建的线索。你会想改动它吗？\",\"evidence\":[1002]}]}";
+                "\"narrative\":[{\"text\":\"你似乎在意日常与自己之间的距离：当重复的事情变得顺手，注意力便有机会回到真正想做的事上。这些收藏让人想到，你寻找的也许不只是方便，还有一种能够亲自安排节奏的自主感。\",\"evidence\":[1001]},"
+                "{\"text\":\"另一条线索，是愿意走近事物的结构，把零散的东西整理成可以理解和改动的秩序。秩序为尝试提供落脚处，却也可能让陌生的可能暂时留在门外。当手边的一切已经足够顺畅，你会把腾出的时间交给更深的理解，还是一个还说不出用途的新念头？\",\"evidence\":[1002]}]}";
             if (mode == 34)
                 answer = "{\"summary\":\"无依据\",\"interests\":[],\"preferences\":[],\"narrative\":[{"
                          "\"text\":\"断言\",\"evidence\":[999999]}]}";
@@ -382,6 +440,11 @@ static char *selection_payload(Library *l, J *candidates, int fault) {
         jtext(l, v, "try_idea", jstr(r, "try_idea"));
         jtext(l, v, "discovery_lane", jstr(r, "discovery_lane"));
         jtext(l, v, "reason", "与画像中的 Windows 兴趣相关。");
+        if (jget(r, "profile_dimensions")) {
+            jset(l, v, "profile_dimensions", jclone(l, jget(r, "profile_dimensions")));
+            jtext(l, v, "summary", "提供具体用途的中文项目概括。");
+            jtext(l, v, "reason", "关联动手构建、效率偏好和信息秩序。");
+        }
         yyjson_mut_arr_append(answers, v);
     }
     J *first = yyjson_mut_arr_get(answers, 0), *second = yyjson_mut_arr_get(answers, 1);
@@ -418,6 +481,15 @@ static char *selection_payload(Library *l, J *candidates, int fault) {
         jset(l, second, "summary", yyjson_mut_uint(l->doc, 123));
     if (fault == 14)
         jtext(l, second, "summary", "中文\n换行");
+    if (fault == 15)
+        jset(l, second, "profile_dimensions", yyjson_mut_arr(l->doc));
+    if (fault == 16) {
+        J *axes = yyjson_mut_arr(l->doc);
+        yyjson_mut_arr_append(axes, yyjson_mut_uint(l->doc, 3));
+        jset(l, second, "profile_dimensions", axes);
+    }
+    if (fault == 17)
+        yyjson_mut_obj_remove_str(second, "summary");
     return yyjson_mut_val_write(out, 0, NULL);
 }
 static void check_unchanged(Library *l, const char *before) {
@@ -431,6 +503,28 @@ static void test_discovery(Library *base) {
     char error[1024] = {0};
     size_t len;
     CHECK(library_clone(&l, base));
+    J *p = jget(root(&l), "profile"), *classes = yyjson_mut_arr(l.doc);
+    for (unsigned k = 0; k < 5; k++) {
+        J *record = yyjson_mut_obj(l.doc), *axes = yyjson_mut_arr(l.doc), *axis = yyjson_mut_obj(l.doc);
+        jnumber(&l, record, "id", 1001 + k);
+        jset(&l, record, "sufficient", yyjson_mut_true(l.doc));
+        jnumber(&l, axis, "dimension", k == 1 ? 2 : k == 2 ? 5 : 1);
+        jtext(&l, axis, "reason", "固定资料中的用途依据。");
+        yyjson_mut_arr_append(axes, axis);
+        jset(&l, record, "axes", axes);
+        yyjson_mut_arr_append(classes, record);
+    }
+    jset(&l, p, "classifications", classes);
+    jtext(&l, p, "source_stamp", "0000000000000000");
+    jnumber(&l, p, "source_version", 2);
+    const char *parts = "[{\"text\":\"你似乎喜欢亲手改变日常。\",\"evidence\":[1001]},{\"text\":\"也愿意为新的可能留些位置。\",\"evidence\":[1002]}]";
+    yyjson_doc *pd = yyjson_read(parts, strlen(parts), 0);
+    jset(&l, p, "narrative", yyjson_val_mut_copy(l.doc, yyjson_doc_get_root(pd)));
+    yyjson_doc_free(pd);
+    jtext(&l, p, "narrative_style", PROFILE_STYLE);
+    char *reflection = profile_reflection(p);
+    CHECK(reflection && !strcmp(reflection, "你似乎喜欢亲手改变日常。也愿意为新的可能留些位置。"));
+    mem_free(reflection);
     J *old = jclone(&l, find_repo(&l, 1002));
     jnumber(&l, old, "id", 8001);
     jtext(&l, old, "full_name", "example/previous-batch");
@@ -499,7 +593,13 @@ static void test_discovery(Library *base) {
                                  DISC_BAD_FINAL,
                                  DISC_SHORT_QUERY,
                                  DISC_DUP_QUERY,
-                                 DISC_BAD_QUERY};
+                                 DISC_BAD_QUERY,
+                                 DISC_BAD_DIMENSION,
+                                 DISC_NARROW_PLAN,
+                                 DISC_RATE_LIMIT,
+                                 DISC_COVERAGE,
+                                 DISC_DUP_DIMENSION,
+                                 DISC_ZERO_DIMENSION};
     for (size_t k = 0; k < sizeof(failure_modes) / sizeof(failure_modes[0]); k++) {
         mode = failure_modes[k];
         reset_discovery_fixture();
@@ -508,16 +608,32 @@ static void test_discovery(Library *base) {
         CHECK(!run_job(&job));
         check_unchanged(&job.library, before);
         CHECK(job.library.revision == curated.revision);
-        if (mode >= DISC_SHORT_QUERY)
+        if (mode >= DISC_SHORT_QUERY && mode != DISC_RATE_LIMIT)
             CHECK(discovery_searches == 0 && discovery_ai == 1);
         mem_free(before);
         drop_job(&job);
     }
+    mode = DISC_PRIVATE_QUERY;
+    reset_discovery_fixture();
+    init_job(&job, &curated, JOB_DISCOVER);
+    J *private_repo = find_repo(&job.library, 1001);
+    jboolean(&job.library, private_repo, "private", true);
+    jtext(&job.library, private_repo, "full_name", "private-owner/secret-project");
+    char *private_before = library_json(&job.library, &len);
+    CHECK(!run_job(&job) && discovery_searches == 0 && discovery_ai == 1);
+    check_unchanged(&job.library, private_before);
+    mem_free(private_before);
+    drop_job(&job);
     mode = DISC_BALANCED;
     init_job(&job, &curated, JOB_DISCOVER);
-    J *p = jget(root(&job.library), "profile");
+    p = jget(root(&job.library), "profile");
     jset(&job.library, p, "interests", yyjson_mut_arr(job.library.doc));
     jset(&job.library, p, "preferences", yyjson_mut_arr(job.library.doc));
+    CHECK(run_job(&job)); /* Six dimensions work without a technical-interest keyword. */
+    drop_job(&job);
+    init_job(&job, &curated, JOB_DISCOVER);
+    p = jget(root(&job.library), "profile");
+    jset(&job.library, p, "classifications", yyjson_mut_arr(job.library.doc));
     int prior_requests = requests;
     char *before = library_json(&job.library, &len);
     CHECK(!run_job(&job) && requests == prior_requests);
@@ -541,7 +657,7 @@ static void test_discovery(Library *base) {
     drop_job(&job);
 
     J *candidates = jget(root(&curated), "discoveries");
-    for (int fault = 1; fault <= 14; fault++) {
+    for (int fault = 1; fault <= 17; fault++) {
         char *answer = selection_payload(&curated, candidates, fault);
         before = library_json(&curated, &len);
         CHECK(!discovery_accept(&curated, candidates, answer, error));
@@ -1094,6 +1210,22 @@ static void test_profile_resume(void) {
     init_job(&j, &restored, JOB_PROFILE);
     int prior = requests;
     CHECK(run_job(&j) && classification_fixture_calls == 0 && requests == prior + 1);
+    p = jget(root(&j.library), "profile");
+    CHECK(!strcmp(jstr(p, "narrative_style"), PROFILE_STYLE));
+    char *reflection = profile_reflection(p);
+    CHECK(reflection && !strchr(reflection, '\n') && !strstr(reflection, "Pulse"));
+    mem_free(reflection);
+    const char *bad_prose[] = {"你喜欢 yftx888/Pulse。", "你喜欢 Pulse。", "项目编号是1001。", "分段\n描述"};
+    char *original = library_json(&j.library, &size);
+    for (unsigned k = 0; k < 4; k++) {
+        J *invalid = jclone(&j.library, p);
+        jtext(&j.library, yyjson_mut_arr_get_first(jget(invalid, "narrative")), "text", bad_prose[k]);
+        char *input = yyjson_mut_val_write(invalid, 0, NULL);
+        CHECK(!profile_accept(&j.library, input, e));
+        check_unchanged(&j.library, original);
+        free(input);
+    }
+    mem_free(original);
     J *r = find_repo(&j.library, 1001);
     jtext(&j.library, r, "ai_summary", "unrelated");
     jnumber(&j.library, r, "stars", 999);
@@ -1585,11 +1717,15 @@ int main(int argc, char **argv) {
     CHECK(job.library.revision == l.revision);
     drop_job(&job);
     mode = 0;
+    init_job(&job, &l, JOB_PROFILE);
+    CHECK(run_job(&job));
+    jset(&l, root(&l), "profile", jclone(&l, jget(root(&job.library), "profile")));
+    drop_job(&job);
     init_job(&job, &l, JOB_DISCOVER);
     CHECK(run_job(&job));
     CHECK(find_candidate(&job.library, 9991) != NULL);
     CHECK(summary_current(find_candidate(&job.library, 9991)));
-    CHECK(strstr(jstr(find_candidate(&job.library, 9991), "recommendation"), "Windows") != NULL);
+    CHECK(strstr(jstr(find_candidate(&job.library, 9991), "recommendation"), "动手构建") != NULL);
     CHECK(library_validate(&job.library, error));
     drop_job(&job);
     mode = 7;

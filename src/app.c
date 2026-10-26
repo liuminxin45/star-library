@@ -33,7 +33,6 @@ enum {
     ACT_AI_HELP,
     ACT_REVEAL,
     ACT_DIR,
-    ACT_PROFILE_DELETE,
     ACT_ABOUT,
     ACT_SCROLL,
     ACT_CONNECT,
@@ -719,34 +718,11 @@ static void preview_discoveries(void) {
     }
     jset(&a.library, root(&a.library), "discoveries", arr);
 }
-static void evidence_links(J *evidence, float x, float *y, float w) {
-    float ex = x - 12;
-    size_t i, n;
-    J *id;
-    yyjson_mut_arr_foreach(evidence, i, n, id) {
-        J *r = find_repo(&a.library, yyjson_mut_get_uint(id));
-        if (!r)
-            continue;
-        float bw = 24 + (float)strlen(jstr(r, "full_name")) * 7;
-        if (bw > w)
-            bw = w;
-        if (ex > x && ex + bw > x + w) {
-            ex = x - 12;
-            *y += 36;
-        }
-        button(jstr(r, "full_name"), ex, *y, bw, ACT_EVIDENCE, jnum(r, "id"), false, false);
-        ex += bw + 8;
-    }
-    *y += 44;
-}
 static void profile_page(void) {
     Palette p = colors();
     page_header(a.test_preview && !*a.snapshot ? "兴趣画像  ·  演示" : "兴趣画像", "");
     J *profile = jget(root(&a.library), "profile");
-    button(a.job && a.job->kind == JOB_PROFILE       ? "分析中…"
-           : jnum(profile, "classification_pending") ? "继续分析"
-           : yyjson_mut_is_obj(profile)              ? "更新画像"
-                                                     : "生成画像",
+    button(a.job && a.job->kind == JOB_PROFILE ? "分析中…" : "更新画像",
            a.width - 152, 26, 120, ACT_PROFILE, 1, false, a.job != NULL);
     float x = a.side + 48, w = a.width - x - 48, y = 110.0f - a.profile_scroll;
     if (w > 820)
@@ -763,29 +739,18 @@ static void profile_page(void) {
         text("收藏线索有变化，可更新画像。", x, y, w, 24, 0, p.muted);
         y += 38;
     }
-    J *paragraphs = jget(profile, "narrative");
     size_t i, n;
     J *v;
-    if (yyjson_mut_is_arr(paragraphs)) {
-        yyjson_mut_arr_foreach(paragraphs, i, n, v) {
-            float h = gfx_text_height(&a.gfx, jstr(v, "text"), w, 3);
-            wrapped(jstr(v, "text"), x, y, w, h, 3, p.text);
-            y += h + 14;
-            evidence_links(jget(v, "evidence"), x, &y, w);
-            y += 10;
-        }
-    } else {
-        float h = gfx_text_height(&a.gfx, jstr(profile, "summary"), w, 3);
-        wrapped(jstr(profile, "summary"), x, y, w, h, 3, p.text);
-        y += h + 30;
-        text("更新画像，看看收藏里的六种兴趣倾向。", x, y, w, 26, 1, p.muted);
-        y += 50;
+    char *reflection = profile_reflection(profile);
+    if (reflection) {
+        float h = gfx_text_height(&a.gfx, reflection, w, 3);
+        wrapped(reflection, x, y, w, h, 3, p.text);
+        y += h + 42;
+        mem_free(reflection);
     }
     if (jget(profile, "classifications")) {
         unsigned counts[6];
         unsigned total = profile_counts(profile, counts);
-        text("收藏线索覆盖率，各维度可重叠。", x, y + 5, w, 25, 0, p.faint);
-        y += 52;
         if (!total) {
             text("资料不足，暂不显示比例。", x, y, w, 28, 1, p.muted);
             y += 52;
@@ -793,8 +758,7 @@ static void profile_page(void) {
             for (unsigned dim = 0; dim < 6; dim++) {
                 button(dimension_names[dim], x - 12, y, 130, ACT_DIMENSION, dim, false, false);
                 char label[100];
-                sprintf_s(label, sizeof(label), "%u%%  ·  %u / %u 个项目",
-                          (counts[dim] * 100 + total / 2) / total, counts[dim], total);
+                sprintf_s(label, sizeof(label), "%u%%", (counts[dim] * 100 + total / 2) / total);
                 gfx_text_right(&a.gfx, label, x + 140, y + 6, w - 140, 24, 0, p.faint);
                 target_add(x + 130, y, w - 130, 35, ACT_DIMENSION, dim, NULL);
                 gfx_fill(&a.gfx, x, y + 40, w, 3, 1, p.border, 1);
@@ -827,8 +791,7 @@ static void profile_page(void) {
                 }
             }
     }
-    button("删除画像", x - 12, y + 12, 120, ACT_PROFILE_DELETE, 0, false, a.job != NULL);
-    a.scroll_limit = (int)(y + a.profile_scroll + 84 - (a.height - 55));
+    a.scroll_limit = (int)(y + a.profile_scroll + 20 - (a.height - 55));
     if (a.scroll_limit < 0)
         a.scroll_limit = 0;
     gfx_unclip(&a.gfx);
@@ -1257,7 +1220,7 @@ static void perform(int action, uint64_t id) {
         return;
     }
     if (a.job && (action == ACT_SAVE || action == ACT_IMPORT || action == ACT_IGNORE ||
-                  action == ACT_PROFILE_DELETE || action == ACT_THEME || action == ACT_DISCONNECT))
+                  action == ACT_THEME || action == ACT_DISCONNECT))
         return;
     switch (action) {
     case ACT_CONCURRENCY:
@@ -1409,15 +1372,6 @@ static void perform(int action, uint64_t id) {
     }
     case ACT_DIR:
         ShellExecuteW(a.window, L"open", a.storage.dir, NULL, NULL, SW_SHOWNORMAL);
-        break;
-    case ACT_PROFILE_DELETE:
-        if (MessageBoxW(a.window, L"删除当前画像？收藏数据会保留，可以重新生成。", APP_NAME,
-                        MB_YESNO | MB_ICONQUESTION) == IDYES) {
-            jset(&a.library, root(&a.library), "profile", yyjson_mut_null(a.library.doc));
-            library_touch(&a.library);
-            save_library();
-            redraw();
-        }
         break;
     }
 }
@@ -2077,11 +2031,8 @@ int ui_run(HINSTANCE instance, int show, const wchar_t *command) {
         const char *demo =
             "{\"narrative\":["
             "{\"text\":"
-            "\"你似乎喜欢让复杂的东西变得可见、可操作。桌面监控、终端与日常工具的收藏，把注意力引向同一个问题"
-            "：怎样让手边的工作更顺手？\",\"evidence\":[1001,1003,1005]},"
-            "{\"text\":\"你也会把目光放到工具背后的零件上。JSON "
-            "读写库与版本管理系统，留下了关于构建与整理的线索。当一个工具已经足够好用时，你还会想亲手改动其中"
-            "的一小部分吗？\",\"evidence\":[1002,1004]}],"
+            "\"你似乎在意日常与自己之间的距离：当重复的事情变得顺手，注意力便有机会回到真正想做的事上。这些收藏让人想到，你寻找的也许不只是方便，还有一种能够亲自安排节奏的自主感。\",\"evidence\":[1001,1003,1005]},"
+            "{\"text\":\"另一条线索，是愿意走近事物的结构，把零散的东西整理成可以理解和改动的秩序。秩序为尝试提供落脚处，却也可能让陌生的可能暂时留在门外。当手边的一切已经足够顺畅，你会把腾出的时间交给更深的理解，还是一个还说不出用途的新念头？\",\"evidence\":[1002,1004]}],"
             "\"classifications\":["
             "{\"id\":1001,\"sufficient\":true,\"axes\":[]},"
             "{\"id\":1002,\"sufficient\":true,\"axes\":[{\"dimension\":1,\"reason\":\"C 语言 JSON "
@@ -2102,6 +2053,7 @@ int ui_run(HINSTANCE instance, int show, const wchar_t *command) {
         profile_fingerprint(&a.library, false, stamp);
         jtext(&a.library, p, "source_stamp", stamp);
         jnumber(&a.library, p, "source_version", 2);
+        jtext(&a.library, p, "narrative_style", PROFILE_STYLE);
         if (!*a.ui_test_report) {
             size_t ri, rn;
             J *r;
@@ -2366,6 +2318,13 @@ static void run_ui_tests(void) {
     unsigned counts[6];
     ui_check(&report, "portrait ratios retained",
              profile_counts(jget(root(&a.library), "profile"), counts) == 5 && counts[1] == 2);
+    unsigned profile_commands = 0;
+    for (int i = 0; i < a.target_count; i++)
+        profile_commands += a.targets[i].action == ACT_PROFILE;
+    char *reflection = profile_reflection(jget(root(&a.library), "profile"));
+    ui_check(&report, "portrait has one update command and one connected paragraph",
+             profile_commands == 1 && reflection && !strchr(reflection, '\n') && !strstr(reflection, "Pulse"));
+    mem_free(reflection);
     perform(ACT_DIMENSION, 1);
     paint();
     ui_check(&report, "portrait evidence still expands", a.expanded_dimension == 1 && a.scroll_limit > 0);
