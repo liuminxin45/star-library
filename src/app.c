@@ -592,8 +592,9 @@ static void repository_list(void) {
         gfx_fill(&a.gfx, cx, cy, w, CARD_HEIGHT, 10, active ? p.hover : p.surface, 1);
         gfx_border(&a.gfx, cx, cy, w, CARD_HEIGHT, 10, p.border, active ? 1 : .65f);
         const char *full = jstr(r, "full_name"), *slash = strchr(full, '/');
+        char avatar_fallback[1024];
         const unsigned char *pixels =
-            avatar_pixels(jnum(r, "owner_id") ? jnum(r, "owner_id") : id, jstr(r, "avatar_url"),
+            avatar_pixels(jnum(r, "owner_id") ? jnum(r, "owner_id") : id, repo_avatar_url(r, avatar_fallback),
                           a.storage.github_key && *a.storage.github_key);
         if (pixels)
             gfx_avatar(&a.gfx, pixels, cx + 16, cy + 18, 32);
@@ -2157,7 +2158,10 @@ int ui_run(HINSTANCE instance, int show, const wchar_t *command) {
     rebuild_visible();
     if (a.capture_expand && *a.snapshot && a.visible_count)
         a.selected = jnum(a.visible[0], "id");
-    avatars_init(&a.storage, a.window);
+    Storage avatar_storage = a.storage;
+    if (*a.snapshot)
+        avatar_storage.demo = false; /* Real snapshots use cached pixels, never generated demo avatars. */
+    avatars_init(&avatar_storage, a.window);
     ShowWindow(a.window, show);
     if (*a.capture || *a.ui_test_report) {
         RECT client, frame;
@@ -2169,6 +2173,8 @@ int ui_run(HINSTANCE instance, int show, const wchar_t *command) {
                      SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
     }
     UpdateWindow(a.window);
+    if (*a.capture)
+        paint(); /* Queue cached avatars before the delayed capture, including hidden windows. */
     if (a.storage.recovered)
         notice("已恢复本地星库；旧文件和备份已保留。", true);
     SetTimer(a.window, 1, 1000, NULL);

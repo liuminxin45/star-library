@@ -11,7 +11,7 @@
 #include "yyjson.h"
 
 #define APP_NAME L"Star Library"
-#define APP_VERSION "0.0.2"
+#define APP_VERSION "0.0.3"
 #define MAX_BODY (32u * 1024u * 1024u)
 #define MAX_REPOS 50000u
 #define WM_JOB (WM_APP + 1)
@@ -137,6 +137,7 @@ DWORD WINAPI job_thread(void *p);
 void job_destroy(Job *job);
 int ui_run(HINSTANCE instance, int show, const wchar_t *command);
 bool avatar_url_valid(const char *url);
+const char *repo_avatar_url(J *repo, char fallback[1024]);
 unsigned char *avatar_decode(const void *data, size_t size);
 void avatars_init(Storage *storage, HWND notify);
 const unsigned char *avatar_pixels(uint64_t owner, const char *url, bool connected);

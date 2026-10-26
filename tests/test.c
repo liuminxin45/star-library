@@ -886,6 +886,23 @@ static void test_parallel_and_avatars(Library *base) {
     CHECK(!avatar_url_valid("http://avatars.githubusercontent.com/u/1"));
     CHECK(!avatar_url_valid("https://evil.example/u/1"));
     CHECK(!avatar_url_valid("https://avatars.githubusercontent.com/u/1\r\n"));
+    char fallback[1024];
+    J *legacy_avatar = yyjson_mut_obj(l.doc);
+    jtext(&l, legacy_avatar, "full_name", "Owner-123/legacy-repo");
+    CHECK(!strcmp(repo_avatar_url(legacy_avatar, fallback),
+                  "https://avatars.githubusercontent.com/Owner-123?s=64"));
+    CHECK(avatar_url_valid(fallback));
+    jtext(&l, legacy_avatar, "avatar_url", "https://avatars.githubusercontent.com/u/123?s=64");
+    CHECK(!strcmp(repo_avatar_url(legacy_avatar, fallback),
+                  "https://avatars.githubusercontent.com/u/123?s=64"));
+    jtext(&l, legacy_avatar, "avatar_url", "https://evil.example/portrait");
+    CHECK(!strcmp(repo_avatar_url(legacy_avatar, fallback),
+                  "https://avatars.githubusercontent.com/Owner-123?s=64"));
+    const char *invalid_owners[] = {"owner?token=x/repo", "../repo", "/repo", "owner/", "owner\\evil/repo"};
+    for (unsigned i = 0; i < sizeof(invalid_owners) / sizeof(*invalid_owners); i++) {
+        jtext(&l, legacy_avatar, "full_name", invalid_owners[i]);
+        CHECK(!*repo_avatar_url(legacy_avatar, fallback));
+    }
     CoInitializeEx(NULL, COINIT_MULTITHREADED);
     unsigned char bmp[58] = {0};
     bmp[0] = 'B';

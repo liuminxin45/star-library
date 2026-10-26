@@ -31,6 +31,23 @@ bool avatar_url_valid(const char *url) {
             return false;
     return true;
 }
+const char *repo_avatar_url(J *repo, char fallback[1024]) {
+    fallback[0] = 0;
+    const char *url = jstr(repo, "avatar_url");
+    if (avatar_url_valid(url))
+        return url;
+    /* Legacy discoveries predate avatar metadata. GitHub's public image CDN
+       also resolves owner logins, without a repository API request or Token. */
+    const char *name = jstr(repo, "full_name"), *slash = strchr(name, '/');
+    if (!slash || slash == name || slash - name > 100 || !slash[1])
+        return fallback;
+    for (const char *p = name; p < slash; p++)
+        if (!((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') ||
+              (*p >= '0' && *p <= '9') || *p == '-'))
+            return fallback;
+    sprintf_s(fallback, 1024, "https://avatars.githubusercontent.com/%.*s?s=64", (int)(slash - name), name);
+    return fallback;
+}
 unsigned char *avatar_decode(const void *data, size_t size) {
     if (!data || !size || size > AVATAR_BYTES)
         return NULL;

@@ -28,6 +28,10 @@
 
 ![真实星库运行截图](docs/images/library.png)
 
+![真实兴趣画像](docs/images/profile.png)
+
+![真实项目发现与 GitHub 头像](docs/images/discovery.png)
+
 ## 构建方法
 
 ### 环境
