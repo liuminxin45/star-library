@@ -2,6 +2,8 @@
 
 已按小众软件的[内容提交规则](https://meta.appinn.net/t/topic/43728)和[发现频道模板](https://meta.appinn.net/t/topic/77583)整理。下方为待发布草稿，尚未代发。使用开发者身份，注明模型服务可能收费、GitHub Token 前提，保留官方直链。发帖时可将真实运行图直接上传到论坛。
 
+三张配图已更新为 0.0.8 的真实运行截图。发现页来自手动“换一批”后保存的四个 AI 工具推荐，包含真实 GitHub 头像，未使用演示数据。
+
 标题建议：**〖开发者自荐〗Star Library：300 多 KB 的 GitHub Stars 管理器，带 AI 整理与兴趣画像**
 
 ---
@@ -45,7 +47,7 @@ Windows 10 / 11，x64，中文界面。
 
 ![兴趣画像](https://raw.githubusercontent.com/liuminxin45/star-library/main/docs/images/profile.png)
 
-![项目发现](https://raw.githubusercontent.com/liuminxin45/star-library/main/docs/images/discovery.png)
+![真实画像生成的 AI 工具推荐](https://raw.githubusercontent.com/liuminxin45/star-library/main/docs/images/discovery.png)
 
 目前是早期版本，欢迎反馈具体使用问题。
 
