@@ -11,7 +11,7 @@
 
 GitHub 同步和 Star / Unstar 需要 Token。AI 使用自行配置的 Chat Completions 服务，可能产生服务费用；相关公开及私有项目元数据会发送给该服务。
 
-有新版本时，设置页显示“更新”并跳转 Release；“★ Star me”可打开项目，已连接账号时直接 Star。
+有新版本时，设置页显示“更新”并跳转 Release；“★ Star me”可打开并 Star 本项目，已 Star 时不会重复写入。
 
 ## 真实运行截图
 

@@ -11,7 +11,7 @@
 #include "yyjson.h"
 
 #define APP_NAME L"Star Library"
-#define APP_VERSION "0.0.7"
+#define APP_VERSION "0.0.8"
 #define PROFILE_STYLE "reflective-v1"
 #define MAX_BODY (32u * 1024u * 1024u)
 #define MAX_REPOS 50000u
@@ -57,7 +57,7 @@ typedef struct {
     HANDLE cancel;
     int kind;
     uint64_t repo_id, base_revision;
-    bool desired_star, ok, discovery_summary;
+    bool desired_star, ok, discovery_summary, star_unchanged;
     unsigned completed, batches, retry_count, insufficient;
     unsigned output_limit, output_parameter;
     uint64_t input_tokens, output_tokens;

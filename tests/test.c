@@ -8,6 +8,7 @@
 static int failures, checks, requests, mode;
 static LONG summary_fixture_calls;
 static LONG classification_fixture_calls;
+static int star_reads, star_writes;
 static LONG parallel_live, parallel_peak, parallel_started, private_seen;
 static unsigned budget_calls, budget_max_items, budget_seen[5];
 static bool expect_topic_ai;
@@ -149,6 +150,12 @@ static char *fixture_analysis(const Request *req, bool summaries) {
 static bool fixture(const Request *req, Response *res, HANDLE cancel) {
     (void)cancel;
     InterlockedIncrement((LONG *)&requests);
+    if (strstr(req->url, "/user/starred/")) {
+        if (!wcscmp(req->method, L"GET"))
+            star_reads++;
+        else
+            star_writes++;
+    }
     if (req->body && strstr(req->body, "任务：收藏兴趣分类"))
         InterlockedIncrement(&classification_fixture_calls);
     if (req->github) {
@@ -263,7 +270,9 @@ static bool fixture(const Request *req, Response *res, HANDLE cancel) {
         return false;
     }
     if (!strcmp(req->url, "https://api.github.com/user")) {
-        res->body = str_copy(mode == 8 ? "{\"login\":\"other\"}" : "{\"login\":\"preview\"}");
+        res->body = str_copy(mode == 8    ? "{\"login\":\"other\"}"
+                             : mode == 73 ? "{\"login\":\"liuminxin45\"}"
+                                          : "{\"login\":\"preview\"}");
         return true;
     }
     if (strstr(req->url, "/releases/latest")) {
@@ -307,6 +316,17 @@ static bool fixture(const Request *req, Response *res, HANDLE cancel) {
     }
     if (strstr(req->url, "/user/starred/")) {
         if (!wcscmp(req->method, L"GET")) {
+            if (mode == 73 || mode == 75) {
+                res->status = 204;
+                if (mode == 75)
+                    SetEvent(cancel);
+                return true;
+            }
+            if (mode == 74) {
+                res->status = 403;
+                error_set(res->error, sizeof(res->error), "fixture state denied");
+                return false;
+            }
             res->status = 404;
             error_set(res->error, sizeof(res->error), "not starred");
             return false;
@@ -1461,6 +1481,53 @@ static void test_token_budgets(void) {
     init_job(&support, &l, JOB_SUPPORT);
     CHECK(run_job(&support) && jbool(find_repo(&support.library, 1430840985), "active"));
     CHECK(!find_candidate(&support.library, 1430840985));
+    drop_job(&support);
+    /* An already-Starred own repository must work with no Starring write access. */
+    Library starred = {0};
+    CHECK(library_clone(&starred, &l));
+    jtext(&starred, root(&starred), "account", "liuminxin45");
+    J *own = yyjson_mut_obj(starred.doc);
+    jnumber(&starred, own, "id", 1430840985);
+    jtext(&starred, own, "full_name", "liuminxin45/star-library");
+    jtext(&starred, own, "starred_at", "2026-10-23T00:00:00Z");
+    jtext(&starred, own, "note", "preserve existing data");
+    jboolean(&starred, own, "active", true);
+    yyjson_mut_arr_append(jget(root(&starred), "repos"), own);
+    mode = 73;
+    star_reads = star_writes = 0;
+    init_job(&support, &starred, JOB_SUPPORT);
+    CHECK(run_job(&support) && support.star_unchanged);
+    CHECK(star_reads == 1 && star_writes == 0);
+    own = find_repo(&support.library, 1430840985);
+    CHECK(jbool(own, "active") && !strcmp(jstr(own, "starred_at"), "2026-10-23T00:00:00Z"));
+    CHECK(!strcmp(jstr(own, "note"), "preserve existing data"));
+    drop_job(&support);
+    library_free(&starred);
+    for (int fault = 0; fault < 4; fault++) {
+        mode = fault == 0 ? 74 : fault == 1 ? 31 : fault == 2 ? 75 : 0;
+        star_reads = star_writes = 0;
+        init_job(&support, &l, JOB_SUPPORT);
+        size_t bytes;
+        char *before = library_json(&support.library, &bytes);
+        if (fault == 3) {
+            CHECK(run_job(&support) && !support.star_unchanged);
+            CHECK(star_reads == 1 && star_writes == 1);
+            CHECK(jbool(find_repo(&support.library, 1430840985), "active"));
+        } else {
+            CHECK(!run_job(&support));
+            CHECK(star_reads == 1 && star_writes == (fault == 1 ? 1 : 0));
+            check_unchanged(&support.library, before);
+        }
+        free(before);
+        drop_job(&support);
+    }
+    mode = 0;
+    star_reads = star_writes = 0;
+    init_job(&support, &l, JOB_STAR);
+    support.repo_id = 1001;
+    support.desired_star = false;
+    CHECK(run_job(&support) && support.star_unchanged);
+    CHECK(star_reads == 1 && star_writes == 0);
     drop_job(&support);
     J *candidate = find_repo(&l, 1001);
     jnumber(&l, candidate, "stars", 500);

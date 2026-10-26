@@ -1439,11 +1439,8 @@ end:
     buf_drop(&in);
     return ok;
 }
-static bool change_star(Job *j) {
+static bool change_star_repo(Job *j, J *r) {
     Library *l = &j->library;
-    J *r = find_candidate(l, j->repo_id);
-    if (!r)
-        r = find_repo(l, j->repo_id);
     if (!r || !repo_name_valid(jstr(r, "full_name"))) {
         error_set(j->error, sizeof(j->error), "项目不存在。");
         return false;
@@ -1466,10 +1463,35 @@ static bool change_star(Job *j) {
     }
     char url[1024], now[32];
     sprintf_s(url, sizeof(url), "https://api.github.com/user/starred/%s", jstr(r, "full_name"));
-    yyjson_doc *d = fetch(j, j->desired_star ? L"PUT" : L"DELETE", url, NULL, true);
-    if (!d)
+    if (cancelled(j->cancel)) {
+        error_set(j->error, sizeof(j->error), "任务已取消。");
         return false;
-    yyjson_doc_free(d);
+    }
+    Request check = {L"GET", url, j->github_key, NULL, true};
+    Response response = {0};
+    bool read = network_transport(&check, &response, j->cancel);
+    bool starred = read && response.status == 204;
+    bool known = starred || response.status == 404;
+    if (!known) {
+        error_set(j->error, sizeof(j->error),
+                  response.status == 401
+                      ? "Token 无效或已过期，请更新连接。"
+                      : "无法读取 Star 状态，请检查 Token 的 Starring 读取权限或稍后重试。");
+        response_free(&response);
+        return false;
+    }
+    response_free(&response);
+    if (cancelled(j->cancel)) {
+        error_set(j->error, sizeof(j->error), "任务已取消。");
+        return false;
+    }
+    j->star_unchanged = starred == j->desired_star;
+    if (!j->star_unchanged) {
+        yyjson_doc *d = fetch(j, j->desired_star ? L"PUT" : L"DELETE", url, NULL, true);
+        if (!d)
+            return false;
+        yyjson_doc_free(d);
+    }
     J *old = find_repo(l, j->repo_id);
     if (!old) {
         old = jclone(l, r);
@@ -1491,10 +1513,16 @@ static bool change_star(Job *j) {
     jtext(l, old, "visibility_status", j->desired_star ? "visible" : "confirmed_unstarred");
     jtext(l, root(l), "account", login_copy);
     utc_now(now);
-    if (j->desired_star)
+    if (j->desired_star && !j->star_unchanged)
         jtext(l, old, "starred_at", now);
     library_touch(l);
     return true;
+}
+static bool change_star(Job *j) {
+    J *repo = find_candidate(&j->library, j->repo_id);
+    if (!repo)
+        repo = find_repo(&j->library, j->repo_id);
+    return change_star_repo(j, repo);
 }
 static bool support_star(Job *j) {
     if (!j->github_key || !*j->github_key)
@@ -1509,10 +1537,8 @@ static bool support_star(Job *j) {
         return false;
     }
     j->repo_id = jnum(repo, "id");
-    if (!find_repo(&j->library, j->repo_id) && !find_candidate(&j->library, j->repo_id))
-        yyjson_mut_arr_append(jget(root(&j->library), "discoveries"), repo);
     j->desired_star = true;
-    bool ok = change_star(j);
+    bool ok = change_star_repo(j, repo);
     if (ok) {
         J *candidates = jget(root(&j->library), "discoveries"), *v;
         size_t i, n;

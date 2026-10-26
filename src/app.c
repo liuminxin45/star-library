@@ -1814,7 +1814,9 @@ static LRESULT CALLBACK window_proc(HWND window, UINT msg, WPARAM wp, LPARAM lp)
                         else
                             strcpy_s(message, sizeof(message), "兴趣画像已更新。");
                         notice(message, false);
-                    } else
+                    } else if (kind == JOB_SUPPORT)
+                        notice(j->star_unchanged ? "已经 Star。" : "已 Star，感谢支持。", false);
+                    else
                         notice(kind == JOB_SYNC       ? "Stars 同步完成。"
                                : kind == JOB_DISCOVER ? "项目发现完成。"
                                                       : "GitHub Star 已更新。",

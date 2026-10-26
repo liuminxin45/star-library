@@ -37,7 +37,7 @@ Windows 10 / 11，x64，中文界面。
 
 一个 300 多 KB 的 exe，免安装，不需要 Node、Python、WebView2 或后台服务。收藏、概括和画像保存在本地，支持 JSON 导入导出，断网也能浏览已有内容。
 
-设置页自动检查新版本，有更新时才显示按钮，点击前往 GitHub Release。也提供了“★ Star me”，已连接 GitHub 时可直接收藏本项目并打开项目页。
+设置页自动检查新版本，有更新时才显示按钮，点击前往 GitHub Release。也提供了“★ Star me”，已连接 GitHub 时可直接 Star 本项目并打开项目页，已经 Star 则直接打开。
 
 使用前需要 GitHub 账号与有 Starring 读写权限的 Token。AI 不内置模型，支持兼容 Chat Completions 的接口；执行 AI 分析时，相关仓库元数据（包括私有仓库）会发送给你配置的模型服务。
 
