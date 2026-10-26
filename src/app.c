@@ -19,7 +19,6 @@ enum {
     ACT_DISCOVER,
     ACT_SETTINGS,
     ACT_OPEN,
-    ACT_SAVE,
     ACT_STAR,
     ACT_IGNORE,
     ACT_EXPORT,
@@ -30,7 +29,6 @@ enum {
     ACT_CANCEL,
     ACT_AI_TEST,
     ACT_GH_HELP,
-    ACT_AI_HELP,
     ACT_REVEAL,
     ACT_DIR,
     ACT_ABOUT,
@@ -167,8 +165,6 @@ static J *lookup_repo(uint64_t id) {
     J *r = find_repo(&a.library, id);
     if (!r)
         r = find_candidate(&a.library, id);
-    if (!r)
-        r = find_saved(&a.library, id);
     return r;
 }
 static void redraw(void) {
@@ -215,7 +211,7 @@ static void edit_set(HWND h, const char *s) {
     a.loading_edits = false;
     mem_free(w);
 }
-static bool guard_draft(void) {
+static bool flush_settings(void) {
     return !a.settings_dirty || save_settings();
 }
 static void clear_filters(void) {
@@ -452,7 +448,7 @@ static void layout(void) {
 static void set_page(int p) {
     if (p == a.page)
         return;
-    if (!guard_draft())
+    if (!flush_settings())
         return;
     if (a.page == PAGE_LIBRARY || a.page == PAGE_DISCOVER) {
         ListState *state = &a.lists[a.page == PAGE_DISCOVER];
@@ -501,8 +497,8 @@ static void target_add(float x, float y, float w, float h, int action, uint64_t 
         return;
     if (a.page == PAGE_PROFILE && x > a.side && action != ACT_PROFILE && (y < 104 || y + h > a.height - 50))
         return;
-    if (a.page == PAGE_SETTINGS && x > a.side && action != ACT_SAVE && action != ACT_SCROLL &&
-        action != ACT_CANCEL && (y < 104 || y + h > a.height - 50))
+    if (a.page == PAGE_SETTINGS && x > a.side && action != ACT_SCROLL && action != ACT_CANCEL &&
+        (y < 104 || y + h > a.height - 50))
         return;
     if (a.target_count >= 500)
         return;
@@ -730,15 +726,6 @@ static void library_page(void) {
 static void preview_discoveries(void) {
     static const char *names[] = {"preview/desk-weather", "preview/window-layout",   "preview/pixel-garden",
                                   "preview/file-map",     "preview/json-playground", "preview/ambient-mixer"};
-    static const char *hooks[] = {"让桌面变成一块天气信息牌",   "给工作和阅读各留一套窗口布局",
-                                  "在像素画布里种一盆植物",     "把杂乱文件夹摊成一张地图",
-                                  "把一份 JSON 拆成看得懂的树", "给专注时间调一场小雨"};
-    static const char *ideas[] = {"把天气和时间放在一起，试一试桌面信息面板的不同布局。",
-                                  "为写代码和阅读分别保存一套窗口布局，再试着来回切换。",
-                                  "画一株像素植物，导出成图片，用作自己的小图标。",
-                                  "选一个熟悉的目录，看看空间花在哪、哪些角落值得整理。",
-                                  "放入一份示例数据，展开层级，再比较两个版本的字段变化。",
-                                  "混合雨声与环境音，调整各自音量，找一组适合阅读的背景声。"};
     static const char *descriptions[] = {"演示项目：可将天气与时间显示为桌面信息面板。",
                                          "演示项目：在 Windows 上保存和恢复窗口布局。",
                                          "演示项目：通过像素画布创建植物图案并导出 PNG 图片。",
@@ -750,15 +737,9 @@ static void preview_discoveries(void) {
         J *r = yyjson_mut_obj(a.library.doc);
         jnumber(&a.library, r, "id", 9101 + i);
         jtext(&a.library, r, "full_name", names[i]);
-        jtext(&a.library, r, "hook", hooks[i]);
-        jtext(&a.library, r, "try_idea", ideas[i]);
         jtext(&a.library, r, "description", descriptions[i]);
         bool adjacent = i == 2 || i == 5;
         jtext(&a.library, r, "discovery_lane", adjacent ? "adjacent" : "core");
-        jtext(&a.library, r, "recommendation",
-              adjacent ? "演示依据：从“小巧、原生、本地运行”的工具偏好，延伸到能亲手创作或调节环境的小体验。"
-                       : "演示依据：与你关注的“原生 Windows "
-                         "工具”和“结构化数据与基础设施”相关，强调可以具体尝试的用途。");
         jtext(&a.library, r, "note", "");
         jtext(&a.library, r, "ai_summary", "");
         jboolean(&a.library, r, "active", true);
@@ -882,21 +863,21 @@ static void settings_page(void) {
             gfx_fill(&a.gfx, x + 84 + i * 48, y + 440, 44, 34, 7, p.raised, 1);
         button(label, x + 84 + i * 48, y + 440, 44, ACT_CONCURRENCY, values[i], false, a.job != NULL);
     }
-    button("测试连接", x + w - 108, y + 440, 108, ACT_AI_TEST, 0, false, a.job != NULL);
+    button("测试连接", x + w - 112, y + 440, 112, ACT_AI_TEST, 0, false, a.job != NULL);
     gfx_line(&a.gfx, x, y + 498, x + w, y + 498, p.border, 1);
-    text("外观", x, y + 516, 100, 34, 3, p.text);
-    button(a.light ? "切换深色" : "切换浅色", x + w - 108, y + 516, 108, ACT_THEME, 0, false, a.job != NULL);
-    text("数据", x, y + 576, 100, 34, 3, p.text);
-    button("导出", x + w - 256, y + 576, 72, ACT_EXPORT, 0, false, a.job != NULL);
-    button("导入", x + w - 176, y + 576, 72, ACT_IMPORT, 0, false, a.job != NULL);
-    button("数据目录", x + w - 96, y + 576, 96, ACT_DIR, 0, false, false);
+    text("外观", x, y + 516, 100, 34, 1, p.text);
+    button(a.light ? "切换深色" : "切换浅色", x + w - 112, y + 516, 112, ACT_THEME, 0, false, a.job != NULL);
+    text("数据", x, y + 576, 100, 34, 1, p.text);
+    button("导出", x + w - 336, y + 576, 112, ACT_EXPORT, 0, false, a.job != NULL);
+    button("导入", x + w - 224, y + 576, 112, ACT_IMPORT, 0, false, a.job != NULL);
+    button("数据目录", x + w - 112, y + 576, 112, ACT_DIR, 0, false, false);
     text("版本 " APP_VERSION, x, y + 630, w - 200, 34, 1, p.muted);
-    char release[96];
-    sprintf_s(release, sizeof(release), version_newer(a.latest, APP_VERSION) ? "新版本 %s" : "Release",
-              a.latest);
-    button(release, x + w - 144, y + 630, 144, ACT_RELEASE, 0, false, false);
-    button("关于与许可", x - 12, y + 684, 120, ACT_ABOUT, 0, false, false);
-    button("Star me", x + w - 96, y + 684, 96, ACT_STAR_ME, 0, false, a.job != NULL);
+    if (version_newer(a.latest, APP_VERSION))
+        button("更新", x + w - 112, y + 630, 112, ACT_RELEASE, 0, false, false);
+    text("关于与许可", x, y + 684, 150, 34, 1,
+         hot(ACT_ABOUT, 0) || focused(ACT_ABOUT, 0) ? p.accent : p.muted);
+    target_add(x - 12, y + 684, 174, 34, ACT_ABOUT, 0, NULL);
+    button("★ Star me", x + w - 112, y + 684, 112, ACT_STAR_ME, 0, true, a.job != NULL);
     text(a.update ? "检查更新中…" : "", x + 130, y + 630, w - 300, 34, 1, p.faint);
     gfx_unclip(&a.gfx);
 }
@@ -1041,7 +1022,7 @@ static void start_job(int kind, uint64_t repo_id, bool desired) {
     if (a.page == PAGE_SETTINGS) {
         if (a.settings_dirty && !save_settings())
             return;
-    } else if (!guard_draft())
+    } else if (!flush_settings())
         return;
     Job *j = mem_alloc(sizeof(*j));
     if (!j || !library_clone(&j->library, &a.library)) {
@@ -1260,7 +1241,7 @@ static void perform(int action, uint64_t id) {
         return;
     }
     if (action == ACT_EVIDENCE) {
-        if (!guard_draft())
+        if (!flush_settings())
             return;
         set_page(PAGE_LIBRARY);
         a.filter = jbool(find_repo(&a.library, id), "active") ? 0 : 2;
@@ -1274,8 +1255,8 @@ static void perform(int action, uint64_t id) {
         redraw();
         return;
     }
-    if (a.job && (action == ACT_SAVE || action == ACT_IMPORT || action == ACT_IGNORE || action == ACT_THEME ||
-                  action == ACT_DISCONNECT))
+    if (a.job &&
+        (action == ACT_IMPORT || action == ACT_IGNORE || action == ACT_THEME || action == ACT_DISCONNECT))
         return;
     switch (action) {
     case ACT_RELEASE:
@@ -1345,12 +1326,6 @@ static void perform(int action, uint64_t id) {
     case ACT_OPEN:
         open_repo(id);
         break;
-    case ACT_SAVE:
-        if (a.page == PAGE_SETTINGS) {
-            save_settings();
-            break;
-        }
-        break;
     case ACT_STAR: {
         J *r = find_repo(&a.library, id);
         bool desired = !r || !jbool(r, "active");
@@ -1361,11 +1336,11 @@ static void perform(int action, uint64_t id) {
         feedback(id, "ignored");
         break;
     case ACT_EXPORT:
-        if (guard_draft())
+        if (flush_settings())
             file_dialog(false);
         break;
     case ACT_IMPORT:
-        if (guard_draft())
+        if (flush_settings())
             file_dialog(true);
         break;
     case ACT_THEME: {
@@ -1411,12 +1386,6 @@ static void perform(int action, uint64_t id) {
     case ACT_GH_HELP:
         ShellExecuteW(a.window, L"open", L"https://github.com/settings/personal-access-tokens", NULL, NULL,
                       SW_SHOWNORMAL);
-        break;
-    case ACT_AI_HELP:
-        MessageBoxW(a.window,
-                    L"兼容 Chat Completions。填写完整接口地址、模型名称与 API "
-                    L"Key。\n公开及私有项目元数据会发送到配置的模型。",
-                    L"模型接口", MB_OK);
         break;
     case ACT_ABOUT: {
         Buffer about = {0};
@@ -1941,7 +1910,7 @@ static LRESULT CALLBACK window_proc(HWND window, UINT msg, WPARAM wp, LPARAM lp)
                 return 0;
             }
         }
-        if (!guard_draft())
+        if (!flush_settings())
             return 0;
         DestroyWindow(window);
         return 0;
@@ -2243,7 +2212,8 @@ int ui_run(HINSTANCE instance, int show, const wchar_t *command) {
                 continue;
             }
             if (ctrl && msg.wParam == 'S') {
-                perform(ACT_SAVE, 0);
+                if (a.page == PAGE_SETTINGS && a.settings_dirty)
+                    save_settings();
                 continue;
             }
             if (ctrl && msg.wParam >= '1' && msg.wParam <= '4') {
@@ -2257,7 +2227,7 @@ int ui_run(HINSTANCE instance, int show, const wchar_t *command) {
             if (msg.wParam == VK_ESCAPE)
                 SendMessageW(a.tooltip, TTM_POP, 0, 0);
             if (msg.wParam == VK_ESCAPE && GetFocus() == a.window) {
-                if (a.selected && guard_draft()) {
+                if (a.selected && flush_settings()) {
                     a.selected = 0;
                     rebuild_visible();
                     layout();
@@ -2429,8 +2399,6 @@ static void run_ui_tests(void) {
     perform(ACT_THEME, 0);
     ui_check(&report, "theme retains automatic settings",
              a.light != light && a.concurrency == 10 && !a.settings_dirty);
-    ui_check(&report, "no Save or interface-help button",
-             target_index(ACT_SAVE, 0) < 0 && target_index(ACT_AI_HELP, 0) < 0);
     SetFocus(a.aiurl);
     SetWindowTextW(a.aiurl, L"https://model.example");
     SendMessageW(a.window, WM_TIMER, 5, 0);
@@ -2483,17 +2451,30 @@ static void run_ui_tests(void) {
     paint();
     ui_check(&report, "settings scroll remains usable", a.setting_scroll > 0 && a.scroll_limit > 0);
     paint();
-    ui_check(&report, "settings expose Release and explicit Star me actions",
-             target_index(ACT_RELEASE, 0) >= 0 && target_index(ACT_STAR_ME, 0) >= 0);
+    ui_check(&report, "settings hide updates until newer version and expose Star me",
+             target_index(ACT_RELEASE, 0) < 0 && target_index(ACT_STAR_ME, 0) >= 0);
+    int test_link = target_index(ACT_AI_TEST, 0), theme_link = target_index(ACT_THEME, 0);
+    int data_link = target_index(ACT_DIR, 0), star_link = target_index(ACT_STAR_ME, 0);
+    ui_check(&report, "settings right actions share width and alignment",
+             test_link >= 0 && theme_link >= 0 && data_link >= 0 && star_link >= 0 &&
+                 a.targets[test_link].r.right == a.targets[theme_link].r.right &&
+                 a.targets[test_link].r.right == a.targets[data_link].r.right &&
+                 a.targets[test_link].r.right == a.targets[star_link].r.right &&
+                 a.targets[test_link].r.right - a.targets[test_link].r.left == 112);
     update_start();
     ui_check(&report, "isolated previews never check real releases", a.update == NULL);
     a.update = mem_alloc(sizeof(*a.update));
     a.update->cancel = CreateEventW(NULL, TRUE, FALSE, NULL);
     a.update->ok = true;
-    strcpy_s(a.update->latest, 32, "v0.0.6");
+    strcpy_s(a.update->latest, 32, "v99.0.0");
     SendMessageW(a.window, WM_UPDATE, 0, (LPARAM)a.update);
     ui_check(&report, "new version result reaches settings and releases worker state",
              !a.update && version_newer(a.latest, APP_VERSION));
+    paint();
+    ui_check(&report, "newer version alone exposes update action", target_index(ACT_RELEASE, 0) >= 0);
+    strcpy_s(a.latest, sizeof(a.latest), APP_VERSION);
+    paint();
+    ui_check(&report, "current version has no update action", target_index(ACT_RELEASE, 0) < 0);
     a.settings_dirty = false;
     set_page(PAGE_DISCOVER);
     preview_discoveries();

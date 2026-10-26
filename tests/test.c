@@ -10,6 +10,7 @@ static LONG summary_fixture_calls;
 static LONG classification_fixture_calls;
 static LONG parallel_live, parallel_peak, parallel_started, private_seen;
 static unsigned budget_calls, budget_max_items, budget_seen[5];
+static bool expect_topic_ai;
 static unsigned parallel_limit;
 static HANDLE parallel_barrier;
 static uint64_t parallel_failed_id;
@@ -37,11 +38,15 @@ enum {
     DISC_RATE_LIMIT,
     DISC_COVERAGE,
     DISC_DUP_DIMENSION,
-    DISC_ZERO_DIMENSION
+    DISC_ZERO_DIMENSION,
+    DISC_TRUNC_PLAN = 26,
+    DISC_BAD_PLAN = 27,
+    DISC_PAGED = 28
 };
-static int discovery_searches, discovery_ai, pool_count, pool_routes[3];
+static int discovery_searches, discovery_ai, pool_count, pool_routes[3], discovery_route;
 static void reset_discovery_fixture(void) {
     discovery_searches = discovery_ai = pool_count = 0;
+    discovery_route = -1;
     memset(pool_routes, 0, sizeof(pool_routes));
 }
 static char *fixture_selections(const Request *req) {
@@ -56,7 +61,6 @@ static char *fixture_selections(const Request *req) {
     }
     yyjson_val *candidates = yyjson_obj_get(yyjson_doc_get_root(packet), "candidates"), *v;
     uint64_t ids[6] = {0};
-    const char *lanes[6] = {0};
     yyjson_val *axes[6] = {0};
     yyjson_val *context = yyjson_obj_get(yyjson_doc_get_root(packet), "profile");
     CHECK(yyjson_arr_size(yyjson_obj_get(context, "dimensions")) == 6);
@@ -76,7 +80,7 @@ static char *fixture_selections(const Request *req) {
             continue;
         ids[selected] = id;
         axes[selected] = yyjson_obj_get(v, "profile_dimensions");
-        lanes[selected++] = lane;
+        selected++;
         if (is_core)
             core++;
         else
@@ -89,18 +93,11 @@ static char *fixture_selections(const Request *req) {
             buf_add(&answer, ",");
         buf_add(&answer, "{\"id\":");
         buf_num(&answer, ids[k]);
-        buf_add(&answer,
-                ",\"hook\":\"试一试 Windows "
-                "小工具\",\"try_idea\":\"查看项目介绍，选择其中一种用途进行尝试。\",\"discovery_lane\":");
-        buf_json_string(&answer, lanes[k]);
         char *dimensions = yyjson_val_write(axes[k], 0, NULL);
         buf_add(&answer, ",\"profile_dimensions\":");
         buf_add(&answer, dimensions ? dimensions : "[]");
         free(dimensions);
-        buf_add(
-            &answer,
-            ",\"summary\":\"面向 Windows "
-            "的实用工具。\",\"reason\":\"关联动手构建、效率偏好和信息秩序，具体功能以项目描述为依据。\"}");
+        buf_add(&answer, ",\"summary\":\"面向 Windows 的实用工具。\"}");
     }
     buf_add(&answer, "]}");
     yyjson_doc_free(packet);
@@ -322,7 +319,23 @@ static bool fixture(const Request *req, Response *res, HANDLE cancel) {
     if (strstr(req->url, "search/repositories")) {
         CHECK(strstr(req->url, "stars%3A%3E%3D100") && strstr(req->url, "sort=stars&order=desc"));
         discovery_searches++;
-        int route = strstr(req->url, "desktop") ? 1 : strstr(req->url, "creative") ? 2 : 0;
+        CHECK(!strstr(req->url, "secret-project"));
+        if (strstr(req->url, "page=1&"))
+            discovery_route++;
+        if (mode == DISC_PAGED && strstr(req->url, "page=1&")) {
+            Buffer page = {0};
+            buf_add(&page, "{\"items\":[");
+            for (unsigned k = 0; k < 100; k++) {
+                if (k)
+                    buf_add(&page, ",");
+                buf_add(&page, "{\"id\":1001,\"full_name\":\"yftx888/"
+                               "Pulse\",\"description\":\"owned\",\"stargazers_count\":1000}");
+            }
+            buf_add(&page, "]}");
+            res->body = page.data;
+            return true;
+        }
+        int route = discovery_route % 3;
         if (mode == DISC_SEARCH_FAIL && route == 2) {
             res->status = 429;
             error_set(res->error, sizeof(res->error), "fixture discovery rate limit");
@@ -339,6 +352,10 @@ static bool fixture(const Request *req, Response *res, HANDLE cancel) {
                     "{\"id\":9997,\"full_name\":\"example/no-evidence\",\"description\":\"\",\"topics\":[]}");
             buf_add(&b, ",{\"id\":9996,\"full_name\":\"example/below-threshold\",\"description\":\"desktop "
                         "tool\",\"stargazers_count\":99}");
+            buf_add(
+                &b,
+                ",{\"id\":9995,\"full_name\":\"example/Major-project-list\",\"description\":\"programming "
+                "exercises\",\"stargazers_count\":999999}");
             if (route)
                 buf_add(&b, ",{\"id\":10000,\"full_name\":\"example/duplicate\",\"description\":\"Windows "
                             "utility\"}");
@@ -377,6 +394,12 @@ static bool fixture(const Request *req, Response *res, HANDLE cancel) {
             yyjson_val *messages = yyjson_obj_get(yyjson_doc_get_root(rd), "messages");
             const char *input = yyjson_get_str(yyjson_obj_get(yyjson_arr_get(messages, 1), "content"));
             yyjson_doc *context = yyjson_read(input, strlen(input), 0);
+            if (expect_topic_ai) {
+                yyjson_val *top =
+                    yyjson_arr_get_first(yyjson_obj_get(yyjson_doc_get_root(context), "repository_topics"));
+                CHECK(!strcmp(yyjson_get_str(yyjson_obj_get(top, "topic")), "ai"));
+                CHECK(yyjson_get_uint(yyjson_obj_get(top, "projects")) >= 3);
+            }
             yyjson_val *dimensions = yyjson_obj_get(yyjson_doc_get_root(context), "dimensions"), *axis;
             unsigned choices[6] = {0}, choice_count = 0;
             size_t di, dn;
@@ -412,6 +435,11 @@ static bool fixture(const Request *req, Response *res, HANDLE cancel) {
             buf_add(&plan, "]}");
             owned = plan.data;
             answer = owned;
+            if (mode == DISC_BAD_PLAN)
+                answer = "not JSON";
+            if (mode == DISC_TRUNC_PLAN)
+                answer = "{\"queries\":[{\"query\":\"topic:ai\",\"intent\":\"寻找可使用的工具。\","
+                         "\"dimensions\":[1]},{\"query\":";
             yyjson_doc_free(context);
             yyjson_doc_free(rd);
         } else if (strstr(req->body, "recommendations")) {
@@ -577,6 +605,9 @@ static void test_discovery(Library *base) {
     char error[1024] = {0};
     size_t len;
     CHECK(library_clone(&l, base));
+    expect_topic_ai = true;
+    for (unsigned k = 0; k < 3; k++)
+        yyjson_mut_arr_append(jget(find_repo(&l, 1001 + k), "topics"), yyjson_mut_strcpy(l.doc, "ai"));
     J *p = jget(root(&l), "profile"), *classes = yyjson_mut_arr(l.doc);
     for (unsigned k = 0; k < 5; k++) {
         J *record = yyjson_mut_obj(l.doc), *axes = yyjson_mut_arr(l.doc), *axis = yyjson_mut_obj(l.doc);
@@ -625,7 +656,8 @@ static void test_discovery(Library *base) {
     for (int k = 0; k < 6; k++)
         CHECK(!strcmp(jstr(yyjson_mut_arr_get(arr, k), "discovery_lane"), expected[k]));
     CHECK(!find_candidate(&job.library, 1001) && !find_candidate(&job.library, 9998) &&
-          !find_candidate(&job.library, 9997) && !find_candidate(&job.library, 9996));
+          !find_candidate(&job.library, 9997) && !find_candidate(&job.library, 9996) &&
+          !find_candidate(&job.library, 9995));
     CHECK(!strcmp(jstr(find_repo(&job.library, 1001), "note"), jstr(find_repo(base, 1001), "note")));
     CHECK(library_validate(&job.library, error));
     CHECK(library_clone(&curated, &job.library));
@@ -633,7 +665,7 @@ static void test_discovery(Library *base) {
     char *curated_json = library_json(&curated, &len);
     Library restored = {0};
     CHECK(library_parse(&restored, curated_json, len, error));
-    CHECK(*jstr(yyjson_mut_arr_get(jget(root(&restored), "discoveries"), 0), "try_idea"));
+    CHECK(*jstr(yyjson_mut_arr_get(jget(root(&restored), "discoveries"), 0), "ai_summary"));
     mem_free(curated_json);
     library_free(&restored);
 
@@ -671,21 +703,14 @@ static void test_discovery(Library *base) {
     CHECK(discovery_searches == 3 && pool_count == 30);
     drop_job(&job);
     library_free(&excluded);
+    mode = DISC_PAGED;
+    reset_discovery_fixture();
+    init_job(&job, &l, JOB_DISCOVER);
+    CHECK(run_job(&job) && discovery_searches == 6 && discovery_ai == 2 && pool_count == 30);
+    drop_job(&job);
 
-    const int failure_modes[] = {7,
-                                 DISC_SEARCH_FAIL,
-                                 DISC_INCOMPLETE,
-                                 DISC_CANCEL,
-                                 DISC_BAD_FINAL,
-                                 DISC_SHORT_QUERY,
-                                 DISC_DUP_QUERY,
-                                 DISC_BAD_QUERY,
-                                 DISC_BAD_DIMENSION,
-                                 DISC_NARROW_PLAN,
-                                 DISC_RATE_LIMIT,
-                                 DISC_COVERAGE,
-                                 DISC_DUP_DIMENSION,
-                                 DISC_ZERO_DIMENSION};
+    const int failure_modes[] = {7,           DISC_SEARCH_FAIL, DISC_INCOMPLETE,
+                                 DISC_CANCEL, DISC_BAD_FINAL,   DISC_RATE_LIMIT};
     for (size_t k = 0; k < sizeof(failure_modes) / sizeof(failure_modes[0]); k++) {
         mode = failure_modes[k];
         reset_discovery_fixture();
@@ -694,9 +719,19 @@ static void test_discovery(Library *base) {
         CHECK(!run_job(&job));
         check_unchanged(&job.library, before);
         CHECK(job.library.revision == curated.revision);
-        if (mode >= DISC_SHORT_QUERY && mode != DISC_RATE_LIMIT)
-            CHECK(discovery_searches == 0 && discovery_ai == 1);
         mem_free(before);
+        drop_job(&job);
+    }
+    const int repair_modes[] = {DISC_SHORT_QUERY, DISC_DUP_QUERY, DISC_BAD_QUERY,     DISC_BAD_DIMENSION,
+                                DISC_NARROW_PLAN, DISC_COVERAGE,  DISC_DUP_DIMENSION, DISC_ZERO_DIMENSION,
+                                DISC_TRUNC_PLAN,  DISC_BAD_PLAN};
+    for (size_t k = 0; k < sizeof(repair_modes) / sizeof(repair_modes[0]); k++) {
+        mode = repair_modes[k];
+        reset_discovery_fixture();
+        init_job(&job, &l, JOB_DISCOVER);
+        CHECK(run_job(&job) && discovery_searches == 3 && discovery_ai == 2);
+        CHECK(yyjson_mut_arr_size(jget(root(&job.library), "discoveries")) == 6);
+        CHECK(library_validate(&job.library, error));
         drop_job(&job);
     }
     mode = DISC_PRIVATE_QUERY;
@@ -705,10 +740,7 @@ static void test_discovery(Library *base) {
     J *private_repo = find_repo(&job.library, 1001);
     jboolean(&job.library, private_repo, "private", true);
     jtext(&job.library, private_repo, "full_name", "private-owner/secret-project");
-    char *private_before = library_json(&job.library, &len);
-    CHECK(!run_job(&job) && discovery_searches == 0 && discovery_ai == 1);
-    check_unchanged(&job.library, private_before);
-    mem_free(private_before);
+    CHECK(run_job(&job) && discovery_searches == 3 && discovery_ai == 2);
     drop_job(&job);
     mode = DISC_BALANCED;
     init_job(&job, &curated, JOB_DISCOVER);
@@ -745,30 +777,42 @@ static void test_discovery(Library *base) {
     J *candidates = jget(root(&curated), "discoveries");
     for (int fault = 1; fault <= 17; fault++) {
         char *answer = selection_payload(&curated, candidates, fault);
-        before = library_json(&curated, &len);
-        CHECK(!discovery_accept(&curated, candidates, answer, error));
-        check_unchanged(&curated, before);
-        mem_free(before);
+        char *original = yyjson_mut_val_write(candidates, 0, NULL);
+        CHECK(discovery_accept(&curated, candidates, answer, error));
+        size_t expected_count = fault == 2 ? 4 : fault == 1 || fault == 8 || fault >= 12 ? 5 : 6;
+        CHECK(yyjson_mut_arr_size(jget(root(&curated), "discoveries")) == expected_count);
+        CHECK(!find_candidate(&curated, 99999999));
+        CHECK(!jget(yyjson_mut_arr_get_first(jget(root(&curated), "discoveries")), "hook"));
+        char *after = yyjson_mut_val_write(candidates, 0, NULL);
+        CHECK(!strcmp(original, after));
+        free(original);
+        free(after);
         mem_free(answer);
     }
-    /* Five core results are rejected even if all IDs and fields are otherwise valid. */
     J *over_pool = yyjson_mut_arr(curated.doc);
-    for (int k = 0; k < 6; k++)
-        if (k != 5)
-            yyjson_mut_arr_append(over_pool, jclone(&curated, yyjson_mut_arr_get(candidates, k)));
+    for (int k = 0; k < 5; k++)
+        yyjson_mut_arr_append(over_pool, jclone(&curated, yyjson_mut_arr_get(candidates, k)));
     J *extra = jclone(&curated, yyjson_mut_arr_get(candidates, 0));
     jnumber(&curated, extra, "id", 13000);
     yyjson_mut_arr_append(over_pool, extra);
     char *answer = selection_payload(&curated, over_pool, 0);
-    before = library_json(&curated, &len);
-    CHECK(!discovery_accept(&curated, over_pool, answer, error));
-    check_unchanged(&curated, before);
+    CHECK(discovery_accept(&curated, over_pool, answer, error));
+    CHECK(yyjson_mut_arr_size(jget(root(&curated), "discoveries")) == 5);
     mem_free(answer);
+    before = library_json(&curated, &len);
+    CHECK(!discovery_accept(&curated, candidates, "{\"recommendations\":[]}", error));
+    check_unchanged(&curated, before);
     mem_free(before);
-    CHECK(discovery_accept(&curated, candidates, "{\"recommendations\":[]}", error));
-    CHECK(!yyjson_mut_arr_size(jget(root(&curated), "discoveries")));
+    Buffer truncated = {0};
+    buf_add(&truncated, "{\"recommendations\":[{\"id\":");
+    buf_num(&truncated, jnum(yyjson_mut_arr_get_first(candidates), "id"));
+    buf_add(&truncated, ",\"summary\":\"可以直接使用的实用工具。\"},{\"id\":");
+    CHECK(discovery_accept(&curated, candidates, truncated.data, error));
+    CHECK(yyjson_mut_arr_size(jget(root(&curated), "discoveries")) == 1);
+    buf_drop(&truncated);
     library_free(&curated);
     library_free(&l);
+    expect_topic_ai = false;
     mode = 0;
 }
 static J *test_value(Library *l, const char *json) {
@@ -1435,6 +1479,11 @@ static void test_token_budgets(void) {
     CHECK(discovery_weight(&l, candidate) > lower);
     jtext(&l, feedback, "state", "later");
     CHECK(discovery_weight(&l, candidate) == 1000);
+    jtext(&l, candidate, "full_name", "example/Major-project-list");
+    CHECK(!discovery_practical(candidate));
+    jtext(&l, candidate, "full_name", "example/practical-ai-tool");
+    jtext(&l, candidate, "description", "An AI application for local documents and automation.");
+    CHECK(discovery_practical(candidate));
     jtext(&l, jget(root(&l), "settings"), "ai_url", "https://model.example");
     jtext(&l, jget(root(&l), "settings"), "ai_model", "fixture");
     jnumber(&l, jget(root(&l), "settings"), "ai_concurrency", 1);
@@ -1901,7 +1950,7 @@ int main(int argc, char **argv) {
     CHECK(run_job(&job));
     CHECK(find_candidate(&job.library, 9991) != NULL);
     CHECK(summary_current(find_candidate(&job.library, 9991)));
-    CHECK(strstr(jstr(find_candidate(&job.library, 9991), "recommendation"), "动手构建") != NULL);
+    CHECK(dimension_mask(jget(find_candidate(&job.library, 9991), "profile_dimensions")) != 0);
     CHECK(library_validate(&job.library, error));
     drop_job(&job);
     mode = 7;

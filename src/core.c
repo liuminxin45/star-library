@@ -172,14 +172,6 @@ J *find_candidate(Library *l, uint64_t id) {
     yyjson_mut_arr_foreach(jget(root(l), "discoveries"), i, n, v) if (jnum(v, "id") == id) return v;
     return NULL;
 }
-J *find_saved(Library *l, uint64_t id) {
-    size_t i, n;
-    J *v;
-    yyjson_mut_arr_foreach(jget(root(l), "feedback"), i, n,
-                           v) if (jnum(v, "id") == id &&
-                                  !strcmp(jstr(v, "state"), "later")) return jget(v, "repo");
-    return NULL;
-}
 bool library_new(Library *l) {
     J *r, *s;
     memset(l, 0, sizeof(*l));
@@ -298,14 +290,52 @@ uint64_t discovery_weight(Library *l, J *repo) {
         stars = 100000000;
     return stars * 100 / (100 + penalty * 60);
 }
-static bool discovery_fields_valid(J *r, bool required) {
+static bool contains_word(const char *text, const char *word) {
+    for (; *text; text++)
+        if (!_strnicmp(text, word, strlen(word)))
+            return true;
+    return false;
+}
+bool discovery_practical(J *repo) {
+    const char *name = jstr(repo, "full_name"), *slash = strchr(name, '/');
+    if (slash)
+        name = slash + 1;
+    const char *names[] = {"awesome-",         "project-list", "project-ideas",
+                           "coding-exercises", "leetcode",     "interview-questions"};
+    for (unsigned k = 0; k < sizeof(names) / sizeof(names[0]); k++)
+        if (contains_word(name, names[k]))
+            return false;
+    const char *bad[] = {"tutorial",           "tutorials",         "awesome-list",
+                         "project-ideas",      "coding-challenges", "interview-questions",
+                         "final-year-project", "college-project",   "programming-exercises"};
+    J *topic;
+    size_t i, n;
+    yyjson_mut_arr_foreach(jget(repo, "topics"), i, n,
+                           topic) for (unsigned k = 0; k < sizeof(bad) / sizeof(bad[0]);
+                                       k++) if (!_stricmp(yyjson_mut_get_str(topic), bad[k])) return false;
+    const char *phrases[] = {"list of project ideas",
+                             "list of projects for",
+                             "programming exercises",
+                             "coding exercises",
+                             "毕业设计",
+                             "课程作业",
+                             "编程练习",
+                             "练习题库",
+                             "项目点子清单"};
+    for (unsigned k = 0; k < sizeof(phrases) / sizeof(phrases[0]); k++)
+        if (contains_word(jstr(repo, "description"), phrases[k]))
+            return false;
+    return true;
+}
+static bool discovery_fields_valid(J *r) {
     if (jget(r, "profile_dimensions") &&
         (!dimension_mask(jget(r, "profile_dimensions")) || !valid_text(r, "search_intent", 600) ||
          !*jstr(r, "search_intent") || !valid_text(r, "query", 200) || !*jstr(r, "query")))
         return false;
-    bool present = jget(r, "hook") || jget(r, "try_idea") || jget(r, "discovery_lane");
-    if (!present && !required)
-        return true; /* Schema 1 legacy discovery. */
+    bool present = jget(r, "hook") || jget(r, "try_idea");
+    if (!present)
+        return !*jstr(r, "discovery_lane") || !strcmp(jstr(r, "discovery_lane"), "core") ||
+               !strcmp(jstr(r, "discovery_lane"), "adjacent");
     const char *lane = jstr(r, "discovery_lane");
     const char *hook = jstr(r, "hook"), *idea = jstr(r, "try_idea");
     if (strpbrk(hook, "\r\n") || strspn(hook, " \t") == strlen(hook) ||
@@ -349,7 +379,7 @@ bool library_validate(Library *l, char *e) {
                 goto bad;
             if (jget(v, "topics") && !valid_string_array(jget(v, "topics"), 100))
                 goto bad;
-            if (!discovery_fields_valid(v, false))
+            if (!discovery_fields_valid(v))
                 goto bad;
         }
         size_t count = yyjson_mut_arr_size(a);
@@ -667,7 +697,7 @@ bool summary_apply(Library *l, J *source, J *v) {
     library_touch(l);
     return true;
 }
-static J *ai_response_items(Library *l, const char *json, const char *key) {
+J *ai_response_items(Library *l, const char *json, const char *key) {
     J *items = NULL;
     yyjson_doc *d = json ? yyjson_read(json, strlen(json), 0) : NULL;
     if (d) {
@@ -968,110 +998,82 @@ bool profile_accept(Library *l, const char *json, char *e) {
     library_touch(l);
     return true;
 }
-static bool discovery_association_valid(Library *l, J *candidate, J *answer) {
-    unsigned source = dimension_mask(jget(candidate, "profile_dimensions"));
-    unsigned selected = dimension_mask(jget(answer, "profile_dimensions")), counts[6];
-    if (!source || !selected || (selected & ~source) || !jget(answer, "summary"))
-        return false;
-    profile_counts(jget(root(l), "profile"), counts);
-    bool named = false;
-    for (unsigned k = 0; k < 6; k++) {
-        if (!(selected & (1u << k)))
-            continue;
-        if (!counts[k])
-            return false;
-        if (strstr(jstr(answer, "reason"), dimension_names[k]))
-            named = true;
-    }
-    return named;
-}
 bool discovery_accept(Library *l, J *candidates, const char *json, char *e) {
-    yyjson_doc *d = yyjson_read(json, strlen(json), 0);
-    J *answers, *v, *selected[6] = {0};
-    uint64_t ids[6] = {0};
-    int core_count = 0, adjacent_count = 0;
+    J *answers = ai_response_items(l, json, "recommendations"), *v, *selected[6] = {0};
+    unsigned core_count = 0, adjacent_count = 0, valid_count = 0, counts[6];
+    profile_counts(jget(root(l), "profile"), counts);
     size_t i, n;
-    if (!d) {
-        error_set(e, 1024, "AI 精选结果不是有效 JSON，已保留上一批。");
-        return false;
-    }
-    answers = yyjson_val_mut_copy(l->doc, yyjson_doc_get_root(d));
-    yyjson_doc_free(d);
-    if (yyjson_mut_is_obj(answers))
-        answers = jget(answers, "recommendations");
-    if (!yyjson_mut_is_arr(answers) || yyjson_mut_arr_size(answers) > 6)
-        goto bad;
     yyjson_mut_arr_foreach(answers, i, n, v) {
+        if (i >= 100 || valid_count == 6)
+            break;
         uint64_t id = jnum(v, "id");
         if (!yyjson_mut_is_uint(jget(v, "id")) || !id)
-            goto bad;
-        for (size_t k = 0; k < i; k++)
-            if (ids[k] == id)
-                goto bad;
-        ids[i] = id;
-        J *candidate = NULL, *r;
+            continue;
+        unsigned duplicates = 0;
+        J *other;
         size_t k, count;
+        yyjson_mut_arr_foreach(answers, k, count, other) if (yyjson_mut_is_uint(jget(other, "id")) &&
+                                                             jnum(other, "id") == id) duplicates++;
+        if (duplicates != 1)
+            continue;
+        J *candidate = NULL, *r;
         yyjson_mut_arr_foreach(candidates, k, count, r) if (jnum(r, "id") == id) {
             candidate = r;
             break;
         }
-        if (!candidate || jnum(candidate, "stars") < 100 || !valid_text(v, "reason", 4096) ||
-            !*jstr(v, "reason") || !discovery_association_valid(l, candidate, v))
-            goto bad;
-        /* Validate on a clone: partial answers never alter candidates or the old batch. */
+        if (!candidate || !discovery_practical(candidate) || jnum(candidate, "stars") < 100 ||
+            !valid_text(v, "summary", 600) || !chinese_text(jstr(v, "summary")) ||
+            strpbrk(jstr(v, "summary"), "\r\n"))
+            continue;
+        J *dimensions = jget(v, "profile_dimensions");
+        if (!dimensions)
+            dimensions = jget(candidate, "profile_dimensions");
+        unsigned source = dimension_mask(jget(candidate, "profile_dimensions")),
+                 chosen = dimension_mask(dimensions);
+        bool valid = source && chosen && !(chosen & ~source);
+        for (unsigned dim = 0; dim < 6; dim++)
+            if ((chosen & (1u << dim)) && !counts[dim])
+                valid = false;
+        bool core = !strcmp(jstr(candidate, "discovery_lane"), "core");
+        if (!valid || (core ? core_count == 4 : adjacent_count == 2) ||
+            (!core && strcmp(jstr(candidate, "discovery_lane"), "adjacent")))
+            continue;
         J *item = jclone(l, candidate);
         if (!item)
-            goto bad;
-        jtext(l, item, "hook", jstr(v, "hook"));
-        jtext(l, item, "try_idea", jstr(v, "try_idea"));
-        jtext(l, item, "discovery_lane", jstr(v, "discovery_lane"));
-        jtext(l, item, "recommendation", jstr(v, "reason"));
-        if (jget(candidate, "profile_dimensions"))
-            jset(l, item, "profile_dimensions", jclone(l, jget(v, "profile_dimensions")));
-        if (jget(v, "summary")) {
-            if (!valid_text(v, "summary", 600) || !chinese_text(jstr(v, "summary")) ||
-                strpbrk(jstr(v, "summary"), "\r\n"))
-                goto bad;
-            char stamp[17];
-            repo_fingerprint(item, stamp);
-            jtext(l, item, "ai_summary", jstr(v, "summary"));
-            jtext(l, item, "summary_source", stamp);
-            jtext(l, item, "summary_language", "zh");
-            jtext(l, item, "summary_status", "ready");
-        }
-        if (!valid_text(v, "hook", 256) || !valid_text(v, "try_idea", 2048) ||
-            !valid_text(v, "discovery_lane", 16) || !discovery_fields_valid(item, true) ||
-            strcmp(jstr(candidate, "discovery_lane"), jstr(item, "discovery_lane")))
-            goto bad;
-        if (!strcmp(jstr(item, "discovery_lane"), "core"))
+            break;
+        jset(l, item, "profile_dimensions", jclone(l, dimensions));
+        char stamp[17];
+        repo_fingerprint(item, stamp);
+        jtext(l, item, "ai_summary", jstr(v, "summary"));
+        jtext(l, item, "summary_source", stamp);
+        jtext(l, item, "summary_language", "zh");
+        jtext(l, item, "summary_status", "ready");
+        if (!discovery_fields_valid(item))
+            continue;
+        if (core)
             core_count++;
         else
             adjacent_count++;
-        if (core_count > 4 || adjacent_count > 2)
-            goto bad;
-        selected[i] = item;
+        selected[valid_count++] = item;
+    }
+    if (!valid_count) {
+        error_set(e, 1024, "本轮没有有效的实用项目推荐，已保留上一批。可稍后换一批。");
+        return false;
     }
     J *result = yyjson_mut_arr(l->doc);
     if (!result)
-        goto bad;
+        return false;
     bool used[6] = {0};
     const char *lanes[] = {"core", "core", "adjacent", "core", "core", "adjacent"};
-    for (int slot = 0; slot < 6; slot++) {
-        for (size_t k = 0; k < n; k++) {
+    for (unsigned slot = 0; slot < 6; slot++)
+        for (unsigned k = 0; k < valid_count; k++)
             if (!used[k] && !strcmp(jstr(selected[k], "discovery_lane"), lanes[slot])) {
                 yyjson_mut_arr_append(result, selected[k]);
                 used[k] = true;
                 break;
             }
-        }
-    }
     jset(l, root(l), "discoveries", result);
     return true;
-bad:
-    error_set(e, 1024,
-              "AI 精选结果缺少有效玩法或真实兴趣依据，包含重复/未知项目，或超出 4 个贴近与 2 "
-              "个拓展的范围；已保留上一批。");
-    return false;
 }
 void library_demo(Library *l) {
     static const char *names[] = {"yftx888/Pulse", "ibireme/yyjson", "microsoft/terminal", "git/git",

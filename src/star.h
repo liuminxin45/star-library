@@ -11,7 +11,7 @@
 #include "yyjson.h"
 
 #define APP_NAME L"Star Library"
-#define APP_VERSION "0.0.5"
+#define APP_VERSION "0.0.7"
 #define PROFILE_STYLE "reflective-v1"
 #define MAX_BODY (32u * 1024u * 1024u)
 #define MAX_REPOS 50000u
@@ -102,7 +102,6 @@ void jboolean(Library *lib, J *obj, const char *key, bool value);
 J *jclone(Library *lib, J *value);
 J *find_repo(Library *lib, uint64_t id);
 J *find_candidate(Library *lib, uint64_t id);
-J *find_saved(Library *lib, uint64_t id);
 bool library_new(Library *lib);
 bool library_parse(Library *lib, const char *json, size_t n, char *error);
 bool library_validate(Library *lib, char *error);
@@ -117,6 +116,7 @@ char *profile_reflection(J *profile);
 bool text_mentions_repo(const char *text, J *repo);
 unsigned dimension_mask(J *dimensions);
 uint64_t discovery_weight(Library *lib, J *repo);
+bool discovery_practical(J *repo);
 bool version_newer(const char *candidate, const char *current);
 bool update_latest(const char *token, HANDLE cancel, char latest[32]);
 bool discovery_accept(Library *lib, J *candidates, const char *json, char *error);
@@ -129,6 +129,7 @@ const char *repo_caption(J *repo);
 unsigned ai_concurrency(Library *lib);
 bool summary_accept(Library *lib, J *batch, const char *json, char *error);
 J *summary_results(Library *lib, J *batch, const char *json);
+J *ai_response_items(Library *lib, const char *json, const char *key);
 bool summary_apply(Library *lib, J *source, J *result);
 void profile_fingerprint(Library *lib, bool include_notes, char out[17]);
 bool profile_current(Library *lib);
