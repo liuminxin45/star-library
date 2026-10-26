@@ -5,8 +5,8 @@
 2 RCDATA "vendor/yyjson/LICENSE"
 3 RCDATA "LICENSE"
 1 VERSIONINFO
-FILEVERSION 0,0,8,0
-PRODUCTVERSION 0,0,8,0
+FILEVERSION 0,0,10,0
+PRODUCTVERSION 0,0,10,0
 FILEOS VOS_NT_WINDOWS32
 FILETYPE VFT_APP
 BEGIN
@@ -15,9 +15,9 @@ BEGIN
   BLOCK "040904B0"
   BEGIN
    VALUE "FileDescription", "Star Library — native GitHub Stars manager\0"
-   VALUE "FileVersion", "0.0.8\0"
+   VALUE "FileVersion", "0.0.10\0"
    VALUE "ProductName", "Star Library\0"
-   VALUE "ProductVersion", "0.0.8\0"
+   VALUE "ProductVersion", "0.0.10\0"
    VALUE "OriginalFilename", "StarLibrary.exe\0"
   END
  END

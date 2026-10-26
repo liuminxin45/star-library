@@ -11,7 +11,7 @@
 #include "yyjson.h"
 
 #define APP_NAME L"Star Library"
-#define APP_VERSION "0.0.8"
+#define APP_VERSION "0.0.10"
 #define PROFILE_STYLE "reflective-v1"
 #define MAX_BODY (32u * 1024u * 1024u)
 #define MAX_REPOS 50000u
@@ -42,6 +42,7 @@ typedef struct {
     const char *url, *token, *body;
     bool github;
     size_t max_bytes;
+    bool raw_prefix;
 } Request;
 typedef struct {
     DWORD status;
@@ -57,7 +58,7 @@ typedef struct {
     HANDLE cancel;
     int kind;
     uint64_t repo_id, base_revision;
-    bool desired_star, ok, discovery_summary, star_unchanged;
+    bool desired_star, ok, discovery_summary, star_unchanged, summary_all;
     unsigned completed, batches, retry_count, insufficient;
     unsigned output_limit, output_parameter;
     uint64_t input_tokens, output_tokens;
@@ -124,7 +125,13 @@ void library_demo(Library *lib);
 extern const char *dimension_names[6];
 void repo_fingerprint(J *repo, char out[17]);
 bool repo_has_material(J *repo);
+bool summary_has_material(J *repo);
+bool readme_current(J *repo);
+void readme_fingerprint(J *repo, char out[17]);
+void summary_fingerprint(J *repo, char out[17]);
 bool summary_current(J *repo);
+bool summary_needed(J *repo, bool all);
+unsigned summary_count(Library *lib, bool all);
 const char *repo_caption(J *repo);
 unsigned ai_concurrency(Library *lib);
 bool summary_accept(Library *lib, J *batch, const char *json, char *error);

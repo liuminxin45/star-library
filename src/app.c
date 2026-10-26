@@ -90,7 +90,7 @@ typedef struct {
     UINT dpi, font_dpi;
     float width, height, side;
     uint64_t selected;
-    bool light, settings_dirty, loading_edits, close_after_job, test_preview, summary_retry;
+    bool light, settings_dirty, loading_edits, close_after_job, test_preview;
     wchar_t notice[1024], search_text[512];
     ULONGLONG notice_until;
     J **visible;
@@ -152,6 +152,9 @@ static void update_start(void) {
 static LRESULT CALLBACK window_proc(HWND, UINT, WPARAM, LPARAM);
 static bool save_settings(void);
 static void run_ui_tests(void);
+#ifdef STAR_UI_CHECKS
+static int ui_dialog_command = IDYES;
+#endif
 static int list_limit(void);
 static void reveal_selected(void);
 static float list_bottom(void);
@@ -225,7 +228,7 @@ static bool matches(J *r) {
     if (a.page == PAGE_LIBRARY) {
         if (a.filter == 0 && !jbool(r, "active"))
             return false;
-        if (a.filter == 1 && (!jbool(r, "active") || summary_current(r)))
+        if (a.filter == 1 && (!jbool(r, "active") || !summary_needed(r, false)))
             return false;
         if (a.filter == 2 && jbool(r, "active"))
             return false;
@@ -689,7 +692,7 @@ static bool ai_running(void) {
                      a.job->kind == JOB_DISCOVER || a.job->kind == JOB_AI_TEST);
 }
 static const char *library_ai_label(void) {
-    return ai_running() ? "AI 整理中…" : a.summary_retry ? "重试整理" : "AI 整理";
+    return ai_running() ? "AI 整理中…" : "AI 整理 ▾";
 }
 static const char *library_sync_label(void) {
     return a.job && a.job->kind == JOB_SYNC ? "同步中…" : "同步";
@@ -1004,14 +1007,6 @@ end:
     secure_free(key);
     return ok;
 }
-static bool summaries_pending(void) {
-    size_t i, n;
-    J *r;
-
-    yyjson_mut_arr_foreach(jget(root(&a.library), "repos"), i, n,
-                           r) if (jbool(r, "active") && !summary_current(r)) return true;
-    return false;
-}
 static void start_job(int kind, uint64_t repo_id, bool desired) {
     if (a.job)
         return;
@@ -1043,6 +1038,7 @@ static void start_job(int kind, uint64_t repo_id, bool desired) {
     j->repo_id = repo_id;
     j->discovery_summary = kind == JOB_SUMMARY && a.page == PAGE_DISCOVER;
     j->desired_star = desired;
+    j->summary_all = kind == JOB_SUMMARY && desired;
     j->base_revision = a.library.revision;
     a.job = j;
     a.thread = CreateThread(NULL, 0, job_thread, j, 0, NULL);
@@ -1191,6 +1187,51 @@ static int popup_menu(HMENU menu) {
     SetFocus(a.window);
     return result;
 }
+static HMENU summary_menu_create(void) {
+    HMENU menu = CreatePopupMenu();
+    for (unsigned mode = 0; mode < 2; mode++) {
+        unsigned count = summary_count(&a.library, mode != 0);
+        wchar_t label[96];
+        if (!mode && !count)
+            wcscpy_s(label, 96, L"增量整理\t已是最新");
+        else
+            swprintf_s(label, 96, L"%s\t%u 项", mode ? L"重新整理全部" : L"增量整理", count);
+        AppendMenuW(menu, MF_STRING | (count ? 0 : MF_GRAYED), mode + 1, label);
+    }
+    return menu;
+}
+#ifdef STAR_UI_CHECKS
+static HRESULT CALLBACK summary_dialog_test(HWND dialog, UINT event, WPARAM wp, LPARAM lp, LONG_PTR data) {
+    (void)wp;
+    (void)lp;
+    (void)data;
+    if (event == TDN_CREATED)
+        PostMessageW(dialog, TDM_CLICK_BUTTON, ui_dialog_command, 0);
+    return S_OK;
+}
+#endif
+static bool summary_confirm(unsigned count) {
+    wchar_t title[96];
+    swprintf_s(title, 96, L"重新整理全部 %u 个项目？", count);
+    TASKDIALOG_BUTTON button = {IDYES, L"开始重新整理"};
+    TASKDIALOGCONFIG config = {0};
+    config.cbSize = sizeof(config);
+    config.hwndParent = a.window;
+    config.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION | TDF_SIZE_TO_CONTENT;
+    config.dwCommonButtons = TDCBF_CANCEL_BUTTON;
+    config.pszWindowTitle = APP_NAME;
+    config.pszMainInstruction = title;
+    config.pszContent = L"将重新调用 AI；新结果保存成功后替换原概括。资料不足的项目自动跳过。";
+    config.cButtons = 1;
+    config.pButtons = &button;
+    config.nDefaultButton = IDCANCEL;
+#ifdef STAR_UI_CHECKS
+    if (*a.ui_test_report)
+        config.pfCallback = summary_dialog_test;
+#endif
+    int result = IDCANCEL;
+    return SUCCEEDED(TaskDialogIndirect(&config, &result, NULL, NULL)) && result == IDYES;
+}
 static void filter_menu(bool language) {
     HMENU menu = CreatePopupMenu();
     if (language) {
@@ -1298,12 +1339,15 @@ static void perform(int action, uint64_t id) {
     case ACT_SUMMARY:
         if (a.job)
             break;
-        if (!id && !summaries_pending()) {
-            notice("中文概括已是最新。", false);
-            break;
+        if (!id) {
+            int choice = popup_menu(summary_menu_create());
+            if (!choice || (choice == 2 && !summary_confirm(summary_count(&a.library, true))))
+                break;
+            if (IsWindow(a.window) && !a.job && summary_count(&a.library, choice == 2))
+                start_job(JOB_SUMMARY, 0, choice == 2);
+        } else {
+            start_job(JOB_SUMMARY, id, false);
         }
-
-        start_job(JOB_SUMMARY, id, false);
         break;
     case ACT_SETTINGS:
         set_page(PAGE_SETTINGS);
@@ -1525,6 +1569,8 @@ static LRESULT CALLBACK window_proc(HWND window, UINT msg, WPARAM wp, LPARAM lp)
             a.tip_text = NULL;
             if (index >= 0 && a.targets[index].action == ACT_OPEN)
                 a.tip_text = wide(repo_caption(lookup_repo(a.targets[index].id)));
+            else if (index >= 0 && a.targets[index].action == ACT_SUMMARY && !a.targets[index].id)
+                a.tip_text = wide("整理全部已 Star 项目，不受搜索或筛选影响；可选择增量补齐或全量重做。");
             info->lpszText = a.tip_text ? a.tip_text : L"";
             return 0;
         }
@@ -1781,8 +1827,6 @@ static LRESULT CALLBACK window_proc(HWND window, UINT msg, WPARAM wp, LPARAM lp)
         a.job = NULL;
 
         int kind = j->kind;
-        if (kind == JOB_SUMMARY)
-            a.summary_retry = j->retry_count > 0 || !j->ok;
         if (j->ok && j->base_revision == a.library.revision) {
             if (j->kind == JOB_SUMMARY) {
                 char message[160];
@@ -2265,6 +2309,7 @@ cleanup:
     CoUninitialize();
     return *e ? 1 : a.ui_failures ? 2 : 0;
 }
+#ifdef STAR_UI_CHECKS
 static void ui_check(Buffer *report, const char *label, bool ok) {
     buf_add(report, ok ? "PASS " : "FAIL ");
     buf_add(report, label);
@@ -2302,6 +2347,46 @@ static void run_ui_tests(void) {
     ui_check(&report, "responsive three-column grid", card_columns() == 3 && card_width() >= 300);
     ui_check(&report, "five isolated demo cards", a.visible_count == 5 && a.storage.demo);
     ui_check(&report, "batch AI action", target_index(ACT_SUMMARY, 0) >= 0);
+    HMENU summary_menu = summary_menu_create();
+    wchar_t menu_text[96];
+    GetMenuStringW(summary_menu, 1, menu_text, 96, MF_BYCOMMAND);
+    ui_check(&report, "summary menu exposes incremental and full counts",
+             GetMenuItemCount(summary_menu) == 2 && wcsstr(menu_text, L"增量整理") &&
+                 wcsstr(menu_text, L"5 项"));
+    DestroyMenu(summary_menu);
+    Library before_menu = {0};
+    library_clone(&before_menu, &a.library);
+    J *menu_repo;
+    size_t mi, mn;
+    yyjson_mut_arr_foreach(jget(root(&a.library), "repos"), mi, mn, menu_repo) {
+        char stamp[17];
+        repo_fingerprint(menu_repo, stamp);
+        jtext(&a.library, menu_repo, "summary_language", "zh");
+        jtext(&a.library, menu_repo, "summary_source", stamp);
+        jtext(&a.library, menu_repo, "summary_status", "ready");
+        jtext(&a.library, menu_repo, "ai_summary", "已有中文概括。");
+    }
+    summary_menu = summary_menu_create();
+    ui_check(&report, "current summaries disable incremental but keep full enabled",
+             (GetMenuState(summary_menu, 1, MF_BYCOMMAND) & MF_GRAYED) &&
+                 !(GetMenuState(summary_menu, 2, MF_BYCOMMAND) & MF_GRAYED));
+    DestroyMenu(summary_menu);
+    char requested[17];
+    repo_fingerprint(find_repo(&a.library, 1001), requested);
+    jtext(&a.library, find_repo(&a.library, 1001), "summary_requested", requested);
+    a.filter = 1;
+    rebuild_visible();
+    ui_check(&report, "pending full work stays visible in incremental filter",
+             summary_count(&a.library, false) == 1 && a.visible_count == 1);
+    a.filter = 0;
+    library_free(&a.library);
+    a.library = before_menu;
+    rebuild_visible();
+    ui_dialog_command = IDCANCEL;
+    ui_check(&report, "full summary confirmation can cancel without starting work",
+             !summary_confirm(5) && !a.job);
+    ui_dialog_command = IDYES;
+    ui_check(&report, "full summary requires explicit confirmation", summary_confirm(5) && !a.job);
     Job busy_profile = {0};
     busy_profile.kind = JOB_PROFILE;
     a.job = &busy_profile;
@@ -2309,7 +2394,7 @@ static void run_ui_tests(void) {
              !strcmp(library_ai_label(), "AI 整理中…") && !strcmp(library_sync_label(), "同步"));
     busy_profile.kind = JOB_SYNC;
     ui_check(&report, "Sync activity does not mark AI as running",
-             !strcmp(library_ai_label(), "AI 整理") && !strcmp(library_sync_label(), "同步中…"));
+             !strcmp(library_ai_label(), "AI 整理 ▾") && !strcmp(library_sync_label(), "同步中…"));
     a.job = NULL;
     int edits = 0, checks = 0;
     for (HWND h = GetWindow(a.window, GW_CHILD); h; h = GetWindow(h, GW_HWNDNEXT)) {
@@ -2510,6 +2595,9 @@ static void run_ui_tests(void) {
     batch.cancel = CreateEventW(NULL, TRUE, FALSE, NULL);
     batch.base_revision = a.library.revision;
     library_clone(&batch.library, &a.library);
+    char resume_stamp[17];
+    repo_fingerprint(find_repo(&batch.library, 1001), resume_stamp);
+    jtext(&batch.library, find_repo(&batch.library, 1001), "summary_requested", resume_stamp);
     library_touch(&batch.library);
     a.job = &batch;
     ui_check(&report, "complete summary batch commits on UI thread",
@@ -2538,6 +2626,8 @@ static void run_ui_tests(void) {
         CloseHandle(locked);
     Library restarted = {0};
     bool restart_ok = storage_load(&isolated, &restarted, save_error);
+    ui_check(&report, "restart restores unfinished full-summary intent",
+             restart_ok && !strcmp(jstr(find_repo(&restarted, 1001), "summary_requested"), resume_stamp));
     ui_check(&report, "restart restores saved repositories and profile",
              restart_ok &&
                  yyjson_mut_arr_size(jget(root(&restarted), "repos")) ==
@@ -2584,6 +2674,18 @@ static void run_ui_tests(void) {
     file_write(a.ui_test_report, report.data, report.len);
     buf_drop(&report);
 }
+#else
+static void run_ui_tests(void) {
+    paint();
+    HMENU menu = summary_menu_create();
+    bool ok = IsWindow(a.window) && a.gfx.target && GetMenuItemCount(menu) == 2;
+    DestroyMenu(menu);
+    const char *report = ok ? "PASS release window and summary menu\nUI RESULT PASS\n"
+                            : "FAIL release window or summary menu\nUI RESULT FAIL\n";
+    a.ui_failures = !ok;
+    file_write(a.ui_test_report, report, strlen(report));
+}
+#endif
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, LPWSTR command, int show) {
     (void)previous;
     return ui_run(instance, show, command);

@@ -33,11 +33,15 @@ try {
     & cl.exe @common @coreSources src\app.c "/Fo$outDir\\" "/Fe$outDir\StarLibrary.exe" "$outDir\app.res" /link /SUBSYSTEM:WINDOWS /LTCG /OPT:REF /OPT:ICF /INCREMENTAL:NO /DYNAMICBASE /NXCOMPAT "/MAP:$outDir\StarLibrary.map" @libraries
     if ($LASTEXITCODE -ne 0) { throw 'Application compilation failed.' }
     $exe = Get-Item -LiteralPath "$outDir\StarLibrary.exe"
-    if ($exe.Length -gt 1000000) { throw "Size gate failed: $($exe.Length) bytes > 1,000,000." }
+    if ($exe.Length -gt 400000) { throw "Size gate failed: $($exe.Length) bytes > 400,000." }
     $imports = & dumpbin.exe /nologo /dependents $exe.FullName
     $imports | Set-Content -LiteralPath "$outDir\dependencies.txt" -Encoding utf8
     if ($imports -match 'VCRUNTIME\d+\.dll|MSVCP\d+\.dll|libgcc|libstdc\+\+|libwinpthread') { throw 'Unexpected distributable runtime dependency.' }
     if ($Test) {
+        # Full UI self-checks share the production UI; only the test harness is omitted from distribution.
+        $coreObjects = $coreSources | ForEach-Object { Join-Path $outDir ([IO.Path]::GetFileNameWithoutExtension($_) + '.obj') }
+        & cl.exe @common /DSTAR_UI_CHECKS=1 src\app.c @coreObjects "/Fo$outDir\\" "/Fe$outDir\StarLibrary-ui-test.exe" "$outDir\app.res" /link /SUBSYSTEM:WINDOWS /LTCG /OPT:REF /OPT:ICF /INCREMENTAL:NO /DYNAMICBASE /NXCOMPAT @libraries
+        if ($LASTEXITCODE -ne 0) { throw 'UI check compilation failed.' }
         & cl.exe @common @coreSources tests\test.c "/Fo$outDir\\" "/Fe$outDir\tests.exe" /link /SUBSYSTEM:CONSOLE /LTCG /OPT:REF /OPT:ICF /INCREMENTAL:NO @libraries
         if ($LASTEXITCODE -ne 0) { throw 'Test compilation failed.' }
         & "$outDir\tests.exe"
@@ -46,6 +50,6 @@ try {
     if (!$FastJsonNumbers -and !$NoInstall) {
         Copy-Item -LiteralPath $exe.FullName -Destination (Join-Path $projectRoot 'StarLibrary.exe') -Force
     }
-    [PSCustomObject]@{ Architecture=$Architecture; Bytes=$exe.Length; Limit=1000000; Path=$exe.FullName } | Format-List
+    [PSCustomObject]@{ Architecture=$Architecture; Bytes=$exe.Length; Limit=400000; Path=$exe.FullName } | Format-List
 }
 finally { Pop-Location }

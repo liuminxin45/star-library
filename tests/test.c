@@ -8,6 +8,8 @@
 static int failures, checks, requests, mode;
 static LONG summary_fixture_calls;
 static LONG classification_fixture_calls;
+static unsigned readme_calls, readme_case;
+static LONG readme_seen;
 static int star_reads, star_writes;
 static LONG parallel_live, parallel_peak, parallel_started, private_seen;
 static unsigned budget_calls, budget_max_items, budget_seen[5];
@@ -117,6 +119,8 @@ static char *fixture_analysis(const Request *req, bool summaries) {
     yyjson_doc *d = yyjson_read(req->body, strlen(req->body), 0);
     yyjson_val *messages = yyjson_obj_get(yyjson_doc_get_root(d), "messages");
     const char *input = yyjson_get_str(yyjson_obj_get(yyjson_arr_get(messages, 1), "content"));
+    if (summaries && input && strstr(input, "README_EVIDENCE_MARKER"))
+        InterlockedExchange(&readme_seen, 1);
     CHECK(input && !strstr(input, "LEGACY_GUIDANCE_SHOULD_NOT_BE_SENT"));
     CHECK(input && !strstr(input, "PRIVATE_OLD_FIELD_MUST_NOT_BE_SENT"));
     if (input && strstr(input, "PRIVATE_METADATA_MARKER"))
@@ -164,6 +168,64 @@ static bool fixture(const Request *req, Response *res, HANDLE cancel) {
     }
     memset(res, 0, sizeof(*res));
     res->status = 200;
+    if (strstr(req->url, "/readme")) {
+        readme_calls++;
+        CHECK(req->github && req->raw_prefix && req->max_bytes == 65536);
+        if (!readme_case || readme_case == 9 || readme_case == 13 || readme_case == 14) {
+            res->status = 404;
+            return false;
+        }
+        if (readme_case == 2 || (readme_case == 10 && strstr(req->url, "yftx888/Pulse"))) {
+            res->status = 403;
+            return false;
+        }
+        if (readme_case == 3 || readme_case == 4) {
+            res->status = readme_case == 4 ? 429 : 500;
+            return false;
+        }
+        if (readme_case == 11) {
+            res->status = 403;
+            res->body = str_copy("{\"message\":\"API rate limit exceeded\"}");
+            return false;
+        }
+        if (readme_case == 5)
+            SetEvent(cancel);
+        if (readme_case == 6)
+            res->body = str_copy("\xff\xff");
+        else if (readme_case == 12)
+            res->body = str_copy("\xe4\xb8");
+        else if (readme_case == 7)
+            res->body = str_copy(" \n\t");
+        else if (readme_case == 8) {
+            res->body = mem_alloc(65537);
+            memset(res->body, 'x', 65536);
+            memcpy(res->body, "README_EVIDENCE_MARKER ", 23);
+            res->size = 65536;
+        } else
+            res->body = str_copy("# Project\n![logo](https://example.com/image.png)\n"
+                                 "README_EVIDENCE_MARKER: A local document search and automation utility.\n"
+                                 "这是用于检索本地文档和自动化日常任务的工具。");
+        return true;
+    }
+    if (strstr(req->url, "/contents")) {
+        CHECK(req->github && !req->raw_prefix);
+        if (readme_case == 9) {
+            res->status = 403;
+            return false;
+        }
+        if (readme_case == 13 || readme_case == 14) {
+            res->status = 404;
+            return false;
+        }
+        res->body = str_copy("[]");
+        return true;
+    }
+    if (strstr(req->url, "/commits?per_page=1")) {
+        res->status = readme_case == 13 ? 409 : 404;
+        res->body = str_copy(readme_case == 13 ? "{\"message\":\"Git Repository is empty.\"}"
+                                               : "{\"message\":\"Not Found\"}");
+        return false;
+    }
     if (mode >= 60 && mode <= 65 && req->body && strstr(req->body, "任务：中文项目概括")) {
         budget_calls++;
         yyjson_doc *d = yyjson_read(req->body, strlen(req->body), 0);
@@ -962,7 +1024,7 @@ static void test_token_summary_profile(Library *base) {
         e));
     CHECK(summary_accept(
         &l, one, "{\"summaries\":[{\"id\":1001,\"summary\":\"资料不足\",\"status\":\"insufficient\"}]}", e));
-    CHECK(summary_current(noinfo));
+    CHECK(!summary_current(noinfo)); /* Old insufficient records must now check README. */
     jtext(&l, noinfo, "description", "恢复桌面工具资料");
     init_job(&j, &l, JOB_SUMMARY);
     j.repo_id = 1001;
@@ -1301,11 +1363,19 @@ static void test_avatar_cache(void) {
     network_transport = fixture;
 }
 static Storage item_commit_storage;
-static unsigned item_commits, item_fail_at;
-static bool item_cancel_after_save;
+static unsigned item_commits, item_fail_at, item_plans, item_plan_fail_on;
+static bool item_cancel_after_save, item_plan_fail;
 static LRESULT CALLBACK item_commit_fixture(HWND window, UINT message, WPARAM wp, LPARAM lp) {
     if (message == WM_BATCH) {
         Job *j = (Job *)lp;
+        if (wp == 1) {
+            item_plans++;
+            if (item_plan_fail || (item_plan_fail_on && item_plans == item_plan_fail_on)) {
+                error_set(j->error, sizeof(j->error), "fixture queue save failed");
+                return FALSE;
+            }
+            return storage_save(&item_commit_storage, &j->library, j->error);
+        }
         if (item_commits == item_fail_at) {
             error_set(j->error, sizeof(j->error), "fixture project save failed");
             return FALSE;
@@ -1322,6 +1392,234 @@ static LRESULT CALLBACK item_commit_fixture(HWND window, UINT message, WPARAM wp
         return 0;
     }
     return DefWindowProcW(window, message, wp, lp);
+}
+static void test_summary_modes(void) {
+    Library l = {0};
+    library_new(&l);
+    library_demo(&l);
+    char error[1024] = {0};
+    J *settings = jget(root(&l), "settings"), *r;
+    jtext(&l, settings, "ai_url", "https://model.example");
+    jtext(&l, settings, "ai_model", "fixture");
+    jnumber(&l, settings, "ai_concurrency", 1);
+    size_t i, n;
+    yyjson_mut_arr_foreach(jget(root(&l), "repos"), i, n, r) {
+        jtext(&l, r, "description", "A desktop developer utility");
+        char stamp[17];
+        repo_fingerprint(r, stamp);
+        jtext(&l, r, "ai_summary", "原有有效概括。");
+        jtext(&l, r, "summary_language", "zh");
+        jtext(&l, r, "summary_source", stamp);
+        jtext(&l, r, "summary_status", "ready");
+    }
+    CHECK(summary_count(&l, false) == 0 && summary_count(&l, true) == 5);
+    Job j;
+    network_transport = fixture;
+    mode = 0;
+    int prior = requests;
+    init_job(&j, &l, JOB_SUMMARY);
+    CHECK(!run_job(&j) && requests == prior);
+    drop_job(&j);
+    WNDCLASSW klass = {0};
+    klass.lpfnWndProc = item_commit_fixture;
+    klass.hInstance = GetModuleHandleW(NULL);
+    klass.lpszClassName = L"StarLibrarySummaryResume";
+    CHECK(RegisterClassW(&klass) != 0);
+    HWND fake = CreateWindowExW(0, klass.lpszClassName, L"", 0, 0, 0, 0, 0, HWND_MESSAGE, NULL,
+                                klass.hInstance, NULL);
+    CHECK(fake != NULL);
+    for (unsigned variant = 0; variant < 6; variant++) {
+        wchar_t dir[512];
+        swprintf_s(dir, 512, L"artifacts\\summary-resume-%lu-%u", GetCurrentProcessId(), variant);
+        memset(&item_commit_storage, 0, sizeof(item_commit_storage));
+        CHECK(storage_init(&item_commit_storage, dir, error));
+        CHECK(storage_save(&item_commit_storage, &l, error));
+        item_commits = 0;
+        item_fail_at = variant == 0 ? 2 : 99;
+        item_cancel_after_save = variant == 1;
+        item_plan_fail = variant == 4;
+        mode = variant == 2 ? 9 : variant == 3 ? 45 : 0;
+        prior = requests;
+        init_job(&j, &l, JOB_SUMMARY);
+        j.summary_all = true;
+        j.notify = fake;
+        bool ok = run_job(&j);
+        CHECK(ok == (variant == 5));
+        CHECK(j.completed == (variant == 0                   ? 2u
+                              : variant == 1 || variant == 3 ? 1u
+                              : variant == 5                 ? 5u
+                                                             : 0u));
+        if (item_plan_fail)
+            CHECK(requests == prior);
+        Library restored = {0};
+        CHECK(storage_load(&item_commit_storage, &restored, error));
+        CHECK(summary_count(&restored, false) == (variant == 4 ? 0 : 5 - j.completed));
+        uint64_t completed_version = jnum(find_repo(&restored, 1001), "version");
+        yyjson_mut_arr_foreach(jget(root(&restored), "repos"), i, n, r) {
+            CHECK(summary_current(r));
+            if (*jstr(r, "summary_requested"))
+                CHECK(!strcmp(repo_caption(r), "原有有效概括。"));
+        }
+        if (summary_count(&restored, false)) {
+            if (variant == 2)
+                jtext(&restored, find_repo(&restored, 1002), "description", "Metadata changed while paused");
+            mode = 0;
+            item_plan_fail = item_cancel_after_save = false;
+            item_fail_at = 99;
+            Job retry;
+            init_job(&retry, &restored, JOB_SUMMARY);
+            retry.notify = fake;
+            CHECK(run_job(&retry) && retry.completed == 5 - j.completed);
+            CHECK(summary_count(&retry.library, false) == 0 && library_validate(&retry.library, error));
+            if (j.completed)
+                CHECK(jnum(find_repo(&retry.library, 1001), "version") == completed_version);
+            drop_job(&retry);
+        }
+        library_free(&restored);
+        drop_job(&j);
+    }
+    item_plan_fail = item_cancel_after_save = false;
+    mode = 0;
+    r = find_repo(&l, 1001);
+    jtext(&l, r, "description", "Updated About");
+    CHECK(summary_count(&l, false) == 1);
+    jtext(&l, r, "summary_requested", "invalid");
+    CHECK(!library_validate(&l, error));
+    yyjson_mut_obj_remove_str(r, "summary_requested");
+    jboolean(&l, r, "active", false);
+    CHECK(summary_count(&l, false) == 0 && summary_count(&l, true) == 4);
+    r = find_repo(&l, 1002);
+    jtext(&l, r, "description", "");
+    jset(&l, r, "topics", yyjson_mut_arr(l.doc));
+    prior = requests;
+    init_job(&j, &l, JOB_SUMMARY);
+    CHECK(run_job(&j) && j.completed == 1 && j.insufficient == 1 && requests > prior);
+    CHECK(summary_count(&j.library, false) == 0 && summary_count(&j.library, true) == 4);
+    drop_job(&j);
+    DestroyWindow(fake);
+    UnregisterClassW(klass.lpszClassName, klass.hInstance);
+    library_free(&l);
+}
+static void test_readme_fallback(void) {
+    Library l = {0};
+    library_new(&l);
+    library_demo(&l);
+    J *settings = jget(root(&l), "settings"), *r;
+    jtext(&l, settings, "ai_url", "https://model.example");
+    jtext(&l, settings, "ai_model", "fixture");
+    size_t i, n;
+    yyjson_mut_arr_foreach(jget(root(&l), "repos"), i, n, r) {
+        jboolean(&l, r, "active", jnum(r, "id") == 1001);
+        jtext(&l, r, "description", "");
+        jset(&l, r, "topics", yyjson_mut_arr(l.doc));
+    }
+    r = find_repo(&l, 1001);
+    jboolean(&l, r, "private", true);
+    network_transport = fixture;
+    char error[1024] = {0};
+    for (unsigned scenario = 0; scenario <= 14; scenario++) {
+        readme_case = scenario;
+        readme_seen = 0;
+        unsigned before = readme_calls;
+        mode = 0;
+        Job j;
+        init_job(&j, &l, JOB_SUMMARY);
+        bool ok = run_job(&j);
+        bool success = scenario == 0 || scenario == 1 || scenario == 7 || scenario == 8 || scenario == 13;
+        CHECK(ok == success && readme_calls == before + 1);
+        J *repo = find_repo(&j.library, 1001);
+        CHECK(j.completed == (success ? 1u : 0u));
+        CHECK(library_validate(&j.library, error));
+        if (success) {
+            CHECK(summary_current(repo) && readme_current(repo));
+            CHECK(strlen(jstr(repo, "readme_excerpt")) <= 2400);
+            CHECK(j.insufficient == (scenario == 0 || scenario == 7 || scenario == 13 ? 1u : 0u));
+            if (scenario == 1)
+                CHECK(readme_seen && !strstr(jstr(repo, "readme_excerpt"), "https://"));
+            if (scenario == 1) {
+                jtext(&j.library, repo, "pushed_at", "new code push, unchanged README");
+                CHECK(summary_current(repo) && !readme_current(repo));
+                int count = requests;
+                Job refresh;
+                init_job(&refresh, &j.library, JOB_SUMMARY);
+                readme_seen = 0;
+                CHECK(run_job(&refresh) && refresh.completed == 1 && requests == count + 2);
+                CHECK(!readme_seen && summary_current(find_repo(&refresh.library, 1001)));
+                drop_job(&refresh);
+            }
+        } else {
+            CHECK(j.retry_count == 1 && strcmp(jstr(repo, "summary_status"), "insufficient"));
+            CHECK(!*jstr(repo, "readme_checked") && summary_count(&j.library, false) == 1);
+            if (scenario == 11)
+                CHECK(strstr(j.error, "限流") != NULL);
+        }
+        drop_job(&j);
+    }
+    readme_case = 10;
+    jboolean(&l, find_repo(&l, 1002), "active", true);
+    Job mixed;
+    init_job(&mixed, &l, JOB_SUMMARY);
+    CHECK(!run_job(&mixed) && mixed.completed == 1 && mixed.retry_count == 1);
+    CHECK(summary_current(find_repo(&mixed.library, 1002)) &&
+          !summary_current(find_repo(&mixed.library, 1001)));
+    drop_job(&mixed);
+    jboolean(&l, find_repo(&l, 1002), "active", false);
+    WNDCLASSW klass = {0};
+    klass.lpfnWndProc = item_commit_fixture;
+    klass.hInstance = GetModuleHandleW(NULL);
+    klass.lpszClassName = L"StarLibraryReadmeCommit";
+    CHECK(RegisterClassW(&klass) != 0);
+    HWND fake = CreateWindowExW(0, klass.lpszClassName, L"", 0, 0, 0, 0, 0, HWND_MESSAGE, NULL,
+                                klass.hInstance, NULL);
+    for (unsigned failure = 0; failure < 2; failure++) {
+        wchar_t dir[512];
+        swprintf_s(dir, 512, L"artifacts\\readme-resume-%lu-%u", GetCurrentProcessId(), failure);
+        memset(&item_commit_storage, 0, sizeof(item_commit_storage));
+        CHECK(storage_init(&item_commit_storage, dir, error));
+        CHECK(storage_save(&item_commit_storage, &l, error));
+        item_plans = item_commits = 0;
+        item_fail_at = 99;
+        item_plan_fail_on = failure ? 2 : 0;
+        item_plan_fail = item_cancel_after_save = false;
+        mode = failure ? 0 : 32;
+        readme_case = 1;
+        readme_seen = 0;
+        Job j;
+        init_job(&j, &l, JOB_SUMMARY);
+        j.notify = fake;
+        CHECK(!run_job(&j) && j.completed == 0);
+        if (failure)
+            CHECK(!readme_seen);
+        Library restored = {0};
+        CHECK(storage_load(&item_commit_storage, &restored, error));
+        CHECK(readme_current(find_repo(&restored, 1001)) == !failure);
+        CHECK(summary_count(&restored, false) == 1);
+        if (!failure) {
+            unsigned count = readme_calls;
+            mode = 0;
+            readme_case = 3; /* Download would fail: persisted evidence must be reused. */
+            Job retry;
+            init_job(&retry, &restored, JOB_SUMMARY);
+            retry.notify = fake;
+            CHECK(run_job(&retry) && retry.completed == 1 && readme_calls == count);
+            CHECK(summary_current(find_repo(&retry.library, 1001)));
+            J *source = jclone(&retry.library, find_repo(&retry.library, 1001));
+            J *result = yyjson_mut_obj(retry.library.doc);
+            jnumber(&retry.library, result, "id", 1001);
+            jtext(&retry.library, result, "summary", "旧依据概括。");
+            jtext(&retry.library, result, "status", "ready");
+            jtext(&retry.library, find_repo(&retry.library, 1001), "readme_excerpt", "New README evidence");
+            CHECK(!summary_apply(&retry.library, source, result));
+            drop_job(&retry);
+        }
+        library_free(&restored);
+        drop_job(&j);
+    }
+    DestroyWindow(fake);
+    UnregisterClassW(klass.lpszClassName, klass.hInstance);
+    item_plan_fail_on = readme_case = 0;
+    mode = 0;
+    library_free(&l);
 }
 static void test_profile_resume(void) {
     Library l = {0}, restored = {0};
@@ -1687,7 +1985,7 @@ static void test_endpoints_and_partial_results(void) {
     j.repo_id = 1003;
     int before = requests;
     CHECK(run_job(&j) && j.completed == 1 && j.insufficient == 1 && j.retry_count == 0);
-    CHECK(requests == before && summary_current(find_repo(&j.library, 1003)));
+    CHECK(requests > before && summary_current(find_repo(&j.library, 1003)));
     drop_job(&j);
     mode = 45;
     jtext(&l, find_repo(&l, 1001), "summary_status", "");
@@ -1891,6 +2189,8 @@ int main(int argc, char **argv) {
     test_token_budgets();
     test_endpoints_and_partial_results();
     test_profile_resume();
+    test_summary_modes();
+    test_readme_fallback();
     test_storage_restart();
     test_storage_migration();
     Library l = {0}, copy = {0};

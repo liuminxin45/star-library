@@ -18,7 +18,7 @@ cd star-library
 .\build.cmd -Architecture x64 -Test
 ```
 
-产物为 `build\x64\StarLibrary.exe`，同时更新项目根目录的 `StarLibrary.exe`；使用 `-NoInstall` 可只构建、不替换根目录程序。仅需分发这一个 exe。构建脚本会检查 1 MB 体积门槛及 DLL 依赖，拒绝额外的可分发运行库依赖。
+产物为 `build\x64\StarLibrary.exe`，同时更新项目根目录的 `StarLibrary.exe`；使用 `-NoInstall` 可只构建、不替换根目录程序。仅需分发这一个 exe。构建脚本会检查 400,000 字节体积门槛及 DLL 依赖，拒绝额外的可分发运行库依赖。`-Test` 另生成包含完整 UI 自检的 `StarLibrary-ui-test.exe`，仅供开发测试。
 
 可选构建 x86：
 
@@ -31,21 +31,27 @@ cd star-library
 ### 原生 UI 检查
 
 ```powershell
-$app = Start-Process .\build\x64\StarLibrary.exe `
-  -ArgumentList '--ui-test', 'ui-results.txt' -PassThru -Wait
+$app = Start-Process .\build\x64\StarLibrary-ui-test.exe `
+  -ArgumentList '--ui-test', 'ui-results.txt' -WindowStyle Hidden -PassThru -Wait
 Get-Content .\ui-results.txt
 if ($app.ExitCode -ne 0) { throw 'UI checks failed' }
 ```
 
-核心与 UI 自动测试使用隔离数据和模拟接口，不调用真实模型或修改 GitHub Stars。`scripts\verify-ui.ps1` 可生成固定演示数据的视觉回归截图，与上面的真实运行截图区分。
+核心与 UI 自动测试使用隔离数据和模拟接口，不调用真实模型或修改 GitHub Stars。正式 `StarLibrary.exe --ui-test` 仍可执行轻量界面自检；两种构建使用相同的应用界面代码，正式版仅省去完整测试用例与断言。`scripts\verify-ui.ps1` 会优先寻找同目录的完整测试程序，并使用正式程序生成演示截图。
 
 ### GitHub Actions 发布
 
 推送到 `main` 或创建 Pull Request 时，GitHub Actions 自动构建 x64、运行核心与原生 UI 检查，并提供构建产物。
 
-推送版本标签（例如 `0.0.1`）后，同一工作流在 GitHub 上重新构建和测试，检查 x64 架构、exe 版本、1 MB 上限及系统 DLL 依赖，通过后自动创建 Release，附带 **StarLibrary.exe** 和 **SHA256SUMS.txt**。版本标签须与源码及资源版本一致。
+推送版本标签（例如 `0.0.1`）后，同一工作流在 GitHub 上重新构建和测试，检查 x64 架构、exe 版本、400,000 字节上限及系统 DLL 依赖，通过后自动创建 Release，附带 **StarLibrary.exe** 和 **SHA256SUMS.txt**。版本标签须与源码及资源版本一致。
 
 ## 开始使用
+
+星库的“AI 整理 ▾”可选择增量整理或重新整理全部。增量跳过未变化的有效概括，并继续上次未完成的项目；全量需确认后执行。整理范围为全部已 Star 项目，不随搜索和语言筛选变化。新结果保存成功才替换旧概括；取消或退出后，重新启动并选择增量整理即可继续，启动不会自动调用模型。
+
+没有 About 和 Topics 的项目自动读取 README 兜底，确认没有可用内容后才标记资料不足，不调用模型、不算失败。读取失败、权限不足、限流等保留待重试。私有仓库需要 Token 的 Contents 读取权限，不能匿名回退。
+
+README 不抓图片或链接，最多读取 64 KiB 前缀，提取不超过 2,400 UTF-8 字节的纯文本节选，纳入现有 token 预算组批。缓存逐项保存；重启重试复用已保存节选。仓库有新推送时增量复查 README，节选未变不重新调用模型；全量和卡片重新概括则刷新读取。旧的“资料不足”项目会在下一次增量整理中自动检查 README。
 
 1. 下载 exe，双击打开。
 2. 在设置中填写 GitHub Token，点击“连接 GitHub”；“获取 Token”可直接前往 GitHub。需要 Starring 读写、Metadata 读取权限，应用不通过实际 Star 操作探测写权限。

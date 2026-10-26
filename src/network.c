@@ -170,7 +170,12 @@ bool http_request(const Request *req, Response *res, HANDLE cancel) {
     WinHttpSetOption(request, WINHTTP_OPTION_REDIRECT_POLICY, &redirects, sizeof(redirects));
     if (req->github)
         WinHttpAddRequestHeaders(
-            request, L"Accept: application/vnd.github.star+json\r\nX-GitHub-Api-Version: 2022-11-28\r\n",
+            request,
+            req->raw_prefix
+                ? L"Accept: application/vnd.github.raw+json\r\nX-GitHub-Api-Version: 2022-11-28\r\n"
+            : strstr(req->url, "/user/starred?")
+                ? L"Accept: application/vnd.github.star+json\r\nX-GitHub-Api-Version: 2022-11-28\r\n"
+                : L"Accept: application/vnd.github+json\r\nX-GitHub-Api-Version: 2022-11-28\r\n",
             (DWORD)-1, WINHTTP_ADDREQ_FLAG_ADD);
     if (req->body)
         WinHttpAddRequestHeaders(request, L"Content-Type: application/json\r\n", (DWORD)-1,
@@ -205,12 +210,17 @@ bool http_request(const Request *req, Response *res, HANDLE cancel) {
         if (!avail)
             break;
         size_t response_limit = req->max_bytes ? req->max_bytes : MAX_BODY;
-        if (avail > response_limit || data.len > response_limit - avail) {
-            error_set(res->error, sizeof(res->error), "响应超过 32 MB，已停止读取。");
+        bool prefix = req->raw_prefix && status == 200;
+        if (!prefix && (avail > response_limit || data.len > response_limit - avail)) {
+            error_set(res->error, sizeof(res->error), "响应过大，已停止读取。");
             goto done;
         }
         char block[16384];
         DWORD step = avail > sizeof(block) ? sizeof(block) : avail;
+        if (prefix && step > response_limit - data.len)
+            step = (DWORD)(response_limit - data.len);
+        if (!step)
+            break;
         if (!WinHttpReadData(request, block, step, &got))
             goto system_error;
         if (!got)
@@ -693,38 +703,242 @@ static bool connect_github(Job *j) {
     return ok;
 }
 #include "ai_batches.h"
+/* Plain bounded evidence only: never render markup, follow links or execute README instructions. */
+static char *readme_excerpt(const char *raw, size_t size) {
+    char *text = mem_alloc(2401);
+    if (!text)
+        return NULL;
+    size_t used = 0;
+    bool space = false;
+    for (size_t i = 0; i < size && used < 2400;) {
+        unsigned char c = (unsigned char)raw[i];
+        if (!c) {
+            mem_free(text);
+            return NULL;
+        }
+        if (c == '<') {
+            while (i < size && raw[i++] != '>') {
+            }
+            space = used != 0;
+            continue;
+        }
+        if ((c == '!' && i + 1 < size && raw[i + 1] == '[') ||
+            (i + 7 < size && (!strncmp(raw + i, "https://", 8) || !strncmp(raw + i, "http://", 7)))) {
+            while (i < size && (unsigned char)raw[i] > ' ' && raw[i] != ')')
+                i++;
+            if (i < size && raw[i] == ')')
+                i++;
+            space = used != 0;
+            continue;
+        }
+        if (c <= ' ' || strchr("*`[]()", c)) {
+            space = used != 0;
+            i++;
+            continue;
+        }
+        if (c >= 128 && (c < 0xc2 || c > 0xf4)) {
+            mem_free(text);
+            return NULL;
+        }
+        size_t bytes = c < 128 ? 1 : c < 224 ? 2 : c < 240 ? 3 : 4;
+        if (i + bytes > size && size != 65536) {
+            mem_free(text);
+            return NULL;
+        }
+        if (i + bytes > size || used + bytes + (space ? 1 : 0) > 2400)
+            break;
+        if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, raw + i, (int)bytes, NULL, 0)) {
+            mem_free(text);
+            return NULL;
+        }
+        if (space)
+            text[used++] = ' ';
+        memcpy(text + used, raw + i, bytes);
+        used += bytes;
+        i += bytes;
+        space = false;
+    }
+    text[used] = 0;
+    return text;
+}
+static int load_readme(Job *j, J *repo, bool refresh) {
+    if (!refresh && readme_current(repo))
+        return 1;
+    char url[1024];
+    if (!repo_name_valid(jstr(repo, "full_name")))
+        return 0;
+    sprintf_s(url, sizeof(url), "https://api.github.com/repos/%s/readme", jstr(repo, "full_name"));
+    Request request = {L"GET", url, j->github_key, NULL, true, 65536, true};
+    Response response = {0};
+    bool ok = network_transport(&request, &response, j->cancel);
+    j->ai_status = response.status;
+    if (response.status == 403 && response.body && contains_ci(response.body, "rate limit"))
+        j->ai_status = 429;
+    char *text = NULL;
+    if (ok && response.status == 200 && response.body)
+        text = readme_excerpt(response.body, response.size ? response.size : strlen(response.body));
+    if (response.status == 404 && !cancelled(j->cancel)) {
+        /* 404 can hide a private repository permission failure. Confirm Contents is readable. */
+        response_free(&response);
+        sprintf_s(url, sizeof(url), "https://api.github.com/repos/%s/contents", jstr(repo, "full_name"));
+        request.raw_prefix = false;
+        request.max_bytes = 1024 * 1024;
+        ok = network_transport(&request, &response, j->cancel);
+        j->ai_status = response.status;
+        if (response.status == 403 && response.body && contains_ci(response.body, "rate limit"))
+            j->ai_status = 429;
+        yyjson_doc *d = ok && response.body ? yyjson_read(response.body, strlen(response.body), 0) : NULL;
+        if (d && yyjson_is_arr(yyjson_doc_get_root(d)))
+            text = str_copy("");
+        if (d)
+            yyjson_doc_free(d);
+        if (!text && response.status == 404 && !cancelled(j->cancel)) {
+            response_free(&response);
+            sprintf_s(url, sizeof(url), "https://api.github.com/repos/%s/commits?per_page=1",
+                      jstr(repo, "full_name"));
+            request.max_bytes = 65536;
+            network_transport(&request, &response, j->cancel);
+            j->ai_status = response.status;
+            if (response.status == 403 && response.body && contains_ci(response.body, "rate limit"))
+                j->ai_status = 429;
+            if (response.status == 409 && response.body && contains_ci(response.body, "repository is empty"))
+                text = str_copy("");
+        }
+    }
+    if (!text || cancelled(j->cancel)) {
+        error_set(j->error, sizeof(j->error),
+                  j->ai_status == 429      ? "GitHub 限流，README 稍后重试。"
+                  : response.status == 401 ? "GitHub Token 无效，请更新连接。"
+                  : response.status == 403 || response.status == 404
+                      ? "README 未读到，请检查 Token 的 Contents 读取权限。"
+                      : "README 读取失败，稍后可用增量整理重试。");
+        mem_free(text);
+        response_free(&response);
+        return 0;
+    }
+    response_free(&response);
+    char stamp[17];
+    readme_fingerprint(repo, stamp);
+    jtext(&j->library, repo, "readme_excerpt", text);
+    jtext(&j->library, repo, "readme_checked", stamp);
+    mem_free(text);
+    return 2;
+}
 static bool summarize(Job *j) {
     Library *l = &j->library;
     J *eligible = yyjson_mut_arr(l->doc), *r;
+    bool prepared = false;
     size_t i, n;
     J *source = jget(root(l), j->discovery_summary ? "discoveries" : "repos");
     yyjson_mut_arr_foreach(source, i, n, r) {
-        if (j->repo_id ? jnum(r, "id") != j->repo_id : (!jbool(r, "active") || summary_current(r)))
+        if (j->repo_id ? jnum(r, "id") != j->repo_id
+                       : (!jbool(r, "active") || !summary_needed(r, j->summary_all)))
             continue;
+        char stamp[17];
+        summary_fingerprint(r, stamp);
+        bool force = j->summary_all || j->repo_id || *jstr(r, "summary_requested");
+        if (strcmp(jstr(r, "summary_requested"), stamp)) {
+            jtext(l, r, "summary_requested", stamp);
+            prepared = true;
+        }
         J *copy = jclone(l, r);
+        jboolean(l, copy, "_summary_force", force);
         jtext(l, copy, "ai_summary", "");
         if (j->discovery_summary)
             jtext(l, copy, "_summary_target", "discovery");
-        if (!repo_has_material(r)) {
+        yyjson_mut_arr_append(eligible, copy);
+    }
+    if (prepared) {
+        /* Persist the entire work set before any paid request. Old captions remain intact. */
+        library_touch(l);
+        if (cancelled(j->cancel) || (j->notify && !SendMessageW(j->notify, WM_BATCH, 1, (LPARAM)j))) {
+            error_set(j->error, sizeof(j->error), "未开始整理：待处理记录未保存，原概括已保留。");
+            return false;
+        }
+    }
+    J *work = yyjson_mut_arr(l->doc);
+    int connected = 0;
+    unsigned missing = 0;
+    char readme_error[1024] = {0};
+    yyjson_mut_arr_foreach(eligible, i, n, r) {
+        if (cancelled(j->cancel))
+            break;
+        J *input = r;
+        J *target = j->discovery_summary ? find_candidate(l, jnum(r, "id")) : find_repo(l, jnum(r, "id"));
+        if (!repo_has_material(target)) {
+            bool refresh = j->summary_all || j->repo_id;
+            if ((refresh || !readme_current(target)) && !connected) {
+                yyjson_doc *account = fetch(j, L"GET", "https://api.github.com/user", NULL, true);
+                const char *login = account ? rstr(yyjson_doc_get_root(account), "login") : "";
+                connected =
+                    *login && (!*jstr(root(l), "account") || !_stricmp(login, jstr(root(l), "account"))) ? 1
+                                                                                                         : -1;
+                if (account)
+                    yyjson_doc_free(account);
+                if (connected < 0 && !*j->error)
+                    error_set(j->error, sizeof(j->error), "GitHub 账号不匹配，README 未读取。");
+            }
+            if (refresh || !readme_current(target)) {
+                char message[384];
+                sprintf_s(message, sizeof(message), "读取 README：%.300s", jstr(target, "full_name"));
+                progress(j, message);
+            }
+            int loaded =
+                connected < 0 && (refresh || !readme_current(target)) ? 0 : load_readme(j, target, refresh);
+            if (!loaded) {
+                missing++;
+                if (!*readme_error)
+                    error_set(readme_error, sizeof(readme_error), j->error);
+                if (j->ai_status == 401 || j->ai_status == 429)
+                    connected = -1;
+                continue;
+            }
+            if (loaded == 2) {
+                bool skip = !jbool(r, "_summary_force") && summary_current(target);
+                char stamp[17];
+                summary_fingerprint(target, stamp);
+                if (skip)
+                    yyjson_mut_obj_remove_str(target, "summary_requested");
+                else
+                    jtext(l, target, "summary_requested", stamp);
+                library_touch(l);
+                if (j->notify && !SendMessageW(j->notify, WM_BATCH, 1, (LPARAM)j))
+                    return false;
+                if (skip) {
+                    j->completed++;
+                    if (!strcmp(jstr(target, "summary_status"), "insufficient"))
+                        j->insufficient++;
+                    continue;
+                }
+            }
+            bool discovery = j->discovery_summary;
+            input = jclone(l, target);
+            if (discovery)
+                jtext(l, input, "_summary_target", "discovery");
+        }
+        if (!summary_has_material(input)) {
             J *empty = yyjson_mut_obj(l->doc);
-            jnumber(l, empty, "id", jnum(r, "id"));
+            jnumber(l, empty, "id", jnum(input, "id"));
             jtext(l, empty, "summary", "资料不足");
             jtext(l, empty, "status", "insufficient");
-            if (!summary_commit(j, copy, empty)) {
+            if (!summary_commit(j, input, empty)) {
                 error_set(j->error, sizeof(j->error), "整理已停止，已保存项目保留。");
                 return false;
             }
             continue;
         }
-        yyjson_mut_arr_append(eligible, copy);
+        yyjson_mut_arr_append(work, jclone(l, input));
     }
-    if (!yyjson_mut_arr_size(eligible)) {
-        if (j->completed)
-            return true;
+    bool ok = !cancelled(j->cancel);
+    if (ok && yyjson_mut_arr_size(work))
+        ok = ai_batches(j, work, 20, summary_instruction, true, NULL);
+    j->retry_count = (unsigned)yyjson_mut_arr_size(eligible) - j->completed;
+    if (missing)
+        sprintf_s(j->error, sizeof(j->error), "已保存 %u 项，%u 项未完成。%s", j->completed, j->retry_count,
+                  readme_error);
+    else if (!yyjson_mut_arr_size(eligible))
         error_set(j->error, sizeof(j->error), "没有待整理项目。");
-        return false;
-    }
-    return ai_batches(j, eligible, 20, summary_instruction, true, NULL);
+    return ok && !j->retry_count && yyjson_mut_arr_size(eligible) != 0;
 }
 static void context_text(Library *l, J *o, const char *key, const char *s, size_t max);
 static bool generate_profile(Job *j) {
@@ -1612,7 +1826,7 @@ DWORD WINAPI job_thread(void *p) {
     if (cancelled(j->cancel) && j->kind != JOB_STAR && j->kind != JOB_SUPPORT) {
         j->ok = false;
         if (j->kind == JOB_SUMMARY)
-            sprintf_s(j->error, sizeof(j->error), "整理已停止，已保存 %u 项。未完成项目可重试。",
+            sprintf_s(j->error, sizeof(j->error), "整理已停止，已保存 %u 项，可用增量整理继续。",
                       j->completed);
         else if (j->kind == JOB_PROFILE)
             sprintf_s(j->error, sizeof(j->error), "分析已停止，已保存 %u 项分类，稍后可继续。", j->completed);

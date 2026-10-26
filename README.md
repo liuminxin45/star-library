@@ -5,11 +5,11 @@
 [下载 Windows x64](https://github.com/liuminxin45/star-library/releases/latest/download/StarLibrary.exe) · [介绍页](https://www.liuminxin.cn/works/star-library) · [MIT](LICENSE)
 
 - **小巧原生**：Windows 10/11，单 exe，免安装，无额外运行环境。
-- **AI 整理**：按预算批量生成中文概括，成功逐项保存，只补试未完成项目。
+- **AI 整理**：选择增量补齐或全量重做，资料缺失时读取 README；按预算批量概括，成功逐项保存，中断、重启后可续接。
 - **兴趣画像与发现**：向内探索的叙事、六种兴趣倾向。按真实收藏主题寻找至少 100 Stars 的实用工具，结合热度与“不感兴趣”反馈精选。
 - **数据在本地**：离线浏览、自动保存、JSON 导入导出，免费开源。
 
-GitHub 同步和 Star / Unstar 需要 Token。AI 使用自行配置的 Chat Completions 服务，可能产生服务费用；相关公开及私有项目元数据会发送给该服务。
+GitHub 同步和 Star / Unstar 需要 Token；私有项目 README 还需 Contents 读取权限。AI 使用自行配置的 Chat Completions 服务，可能产生服务费用；相关项目元数据及必要的 README 节选会发送给该服务。
 
 有新版本时，设置页显示“更新”并跳转 Release；“★ Star me”可打开并 Star 本项目，已 Star 时不会重复写入。
 
@@ -29,6 +29,6 @@ GitHub 同步和 Star / Unstar 需要 Token。AI 使用自行配置的 Chat Comp
 .\build.cmd -Architecture x64 -Test
 ```
 
-产物为 `StarLibrary.exe`，不超过 1,000,000 字节。[完整构建、测试与使用说明](docs/build-and-usage.md)。
+产物为 `StarLibrary.exe`，不超过 400,000 字节。[完整构建、测试与使用说明](docs/build-and-usage.md)。
 
 JSON 使用 [yyjson](https://github.com/ibireme/yyjson)；界面参考 [ChatGPT-Desktop-UI](https://github.com/liuminxin45/ChatGPT-Desktop-UI)，以 C17 和 Windows 原生绘制实现。

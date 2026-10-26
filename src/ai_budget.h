@@ -32,9 +32,12 @@ static bool ai_pack(Library *l, Buffer *out, J *repos, bool summary, size_t desc
         J *item = yyjson_mut_obj(l->doc);
         jnumber(l, item, "id", jnum(repo, "id"));
         jtext(l, item, "n", jstr(repo, "full_name"));
-        if (*jstr(repo, "description")) {
+        const char *description =
+            summary && !repo_has_material(repo) ? jstr(repo, "readme_excerpt") : jstr(repo, "description");
+        if (*description) {
             Buffer text = {0};
-            append_data_string(&text, jstr(repo, "description"), description_limit);
+            append_data_string(&text, description,
+                               summary && !repo_has_material(repo) ? 2400 : description_limit);
             yyjson_doc *d = text.failed ? NULL : yyjson_read(text.data, text.len, 0);
             if (!d) {
                 buf_drop(&text);

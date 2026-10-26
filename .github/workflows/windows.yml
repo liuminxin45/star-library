@@ -33,10 +33,14 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $report = Join-Path $PWD 'artifacts/ui-x64.txt'
           New-Item -ItemType Directory -Path artifacts -Force | Out-Null
-          $app = Start-Process -FilePath ./build/x64/StarLibrary.exe -ArgumentList @('--ui-test', ('"' + $report + '"')) -PassThru
+          $app = Start-Process -FilePath ./build/x64/StarLibrary-ui-test.exe -ArgumentList @('--ui-test', ('"' + $report + '"')) -WindowStyle Hidden -PassThru
           if (!$app.WaitForExit(60000)) { $app.Kill(); throw 'UI checks timed out.' }
           Get-Content -LiteralPath $report
           if ($app.ExitCode -ne 0) { throw 'UI checks failed.' }
+          $report = Join-Path $PWD 'artifacts/ui-x64-release.txt'
+          $app = Start-Process -FilePath ./build/x64/StarLibrary.exe -ArgumentList @('--ui-test', ('"' + $report + '"')) -WindowStyle Hidden -PassThru
+          if (!$app.WaitForExit(60000) -or $app.ExitCode -ne 0) { throw 'Release UI checks failed.' }
+          Get-Content -LiteralPath $report
       - name: Package single executable
         shell: pwsh
         env:
@@ -46,7 +50,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $exe = Get-Item ./build/x64/StarLibrary.exe
-          if ($exe.Length -gt 1000000) { throw 'Executable exceeds 1,000,000 bytes.' }
+          if ($exe.Length -gt 400000) { throw 'Executable exceeds 400,000 bytes.' }
           $bytes = [IO.File]::ReadAllBytes($exe.FullName)
           $pe = [BitConverter]::ToInt32($bytes, 0x3c)
           if ([BitConverter]::ToUInt16($bytes, $pe + 4) -ne 0x8664) { throw 'Executable is not x64.' }
@@ -58,11 +62,11 @@ jobs:
           Copy-Item -LiteralPath $exe.FullName -Destination dist/StarLibrary.exe
           $hash = (Get-FileHash dist/StarLibrary.exe -Algorithm SHA256).Hash.ToLowerInvariant()
           "$hash  StarLibrary.exe" | Set-Content dist/SHA256SUMS.txt -Encoding ascii
+          $notesPath = "docs/releases/$version.md"
+          $changes = if (Test-Path -LiteralPath $notesPath) { Get-Content -LiteralPath $notesPath -Raw -Encoding utf8 } else { '包含 Star 管理、中文 AI 概括、兴趣画像与项目发现。' }
           @("Star Library $version", '', 'Windows 10/11 x64，下载 StarLibrary.exe 后双击运行。',
             '', "文件大小：$($exe.Length) 字节；无安装器、额外运行库或后台服务。",
-            '', '包含 Star 管理、中文 AI 概括、可续接的兴趣分类与画像、项目发现。',
-            '', '旧发现记录缺少头像元数据时，也能加载所属账号的真实 GitHub 头像，图片请求不携带 Token。',
-            '', '补充真实兴趣画像与项目发现截图；快照预览使用本地头像缓存，隐藏窗口先加载缓存再截图。',
+            '', $changes,
             '', "Commit: $env:BUILD_SHA", "SHA-256: $hash") | Set-Content dist/release-notes.md -Encoding utf8
           "x64 $version : $($exe.Length) bytes" >> $env:GITHUB_STEP_SUMMARY
       - name: Upload release files
@@ -79,6 +83,7 @@ jobs:
           name: windows-x64-validation
           path: |
             artifacts/ui-x64.txt
+            artifacts/ui-x64-release.txt
             build/x64/dependencies.txt
           if-no-files-found: ignore
 

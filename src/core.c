@@ -369,7 +369,15 @@ bool library_validate(Library *l, char *e) {
                 !strchr(jstr(v, "full_name"), '/') || !valid_text(v, "description", 32000) ||
                 !valid_text(v, "note", 65536) || !valid_text(v, "ai_summary", 65536) ||
                 !valid_text(v, "summary_language", 16) || !valid_text(v, "summary_status", 32) ||
-                !valid_text(v, "summary_source", 16) || !valid_text(v, "avatar_url", 1024) ||
+                !valid_text(v, "summary_source", 16) || !valid_text(v, "summary_requested", 16) ||
+                !valid_text(v, "readme_excerpt", 2400) || !valid_text(v, "readme_checked", 16) ||
+                (jget(v, "readme_checked") && (strlen(jstr(v, "readme_checked")) != 16 ||
+                                               strspn(jstr(v, "readme_checked"), "0123456789abcdef") != 16 ||
+                                               !jget(v, "readme_excerpt"))) ||
+                (jget(v, "summary_requested") &&
+                 (strlen(jstr(v, "summary_requested")) != 16 ||
+                  strspn(jstr(v, "summary_requested"), "0123456789abcdef") != 16)) ||
+                !valid_text(v, "avatar_url", 1024) ||
                 (jget(v, "owner_id") && !yyjson_mut_is_uint(jget(v, "owner_id"))))
                 goto bad;
             if (jget(v, "tags") && !valid_string_array(jget(v, "tags"), 64))
@@ -642,11 +650,42 @@ bool repo_has_material(J *r) {
 }
 bool summary_current(J *r) {
     char stamp[17];
-    repo_fingerprint(r, stamp);
+    if (!repo_has_material(r) && !*jstr(r, "readme_checked"))
+        return false;
+    summary_fingerprint(r, stamp);
     return !strcmp(jstr(r, "summary_language"), "zh") && !strcmp(jstr(r, "summary_source"), stamp) &&
            ((!strcmp(jstr(r, "summary_status"), "ready") && *jstr(r, "ai_summary")) ||
             (!strcmp(jstr(r, "summary_status"), "insufficient") &&
              !strcmp(jstr(r, "ai_summary"), "资料不足")));
+}
+bool summary_needed(J *r, bool all) {
+    return all || *jstr(r, "summary_requested") || !summary_current(r) ||
+           (!repo_has_material(r) && !readme_current(r));
+}
+void readme_fingerprint(J *r, char out[17]) {
+    sprintf_s(out, 17, "%016llx", (unsigned long long)hash_text(repo_hash(r), jstr(r, "pushed_at")));
+}
+bool readme_current(J *r) {
+    char stamp[17];
+    readme_fingerprint(r, stamp);
+    return !strcmp(stamp, jstr(r, "readme_checked"));
+}
+bool summary_has_material(J *r) {
+    return repo_has_material(r) || *jstr(r, "readme_excerpt");
+}
+void summary_fingerprint(J *r, char out[17]) {
+    uint64_t hash = repo_hash(r);
+    if (!repo_has_material(r) && *jstr(r, "readme_excerpt"))
+        hash = hash_text(hash, jstr(r, "readme_excerpt"));
+    sprintf_s(out, 17, "%016llx", (unsigned long long)hash);
+}
+unsigned summary_count(Library *l, bool all) {
+    unsigned count = 0;
+    J *r;
+    size_t i, n;
+    yyjson_mut_arr_foreach(jget(root(l), "repos"), i, n, r) if (jbool(r, "active") && summary_needed(r, all))
+        count++;
+    return count;
 }
 const char *repo_caption(J *r) {
     return summary_current(r) && !strcmp(jstr(r, "summary_status"), "ready") ? jstr(r, "ai_summary")
@@ -674,13 +713,13 @@ static bool chinese_text(const char *s) {
 static bool summary_valid(Library *l, J *source, J *v) {
     J *target = summary_target(l, source);
     char input_stamp[17], current_stamp[17];
-    repo_fingerprint(source, input_stamp);
-    repo_fingerprint(target, current_stamp);
+    summary_fingerprint(source, input_stamp);
+    summary_fingerprint(target, current_stamp);
     return source && target && yyjson_mut_is_uint(jget(v, "id")) && jnum(source, "id") == jnum(v, "id") &&
            !strcmp(input_stamp, current_stamp) && valid_text(v, "status", 16) &&
            valid_text(v, "summary", 600) && chinese_text(jstr(v, "summary")) &&
            !strpbrk(jstr(v, "summary"), "\r\n") &&
-           ((!strcmp(jstr(v, "status"), "ready") && repo_has_material(source)) ||
+           ((!strcmp(jstr(v, "status"), "ready") && summary_has_material(source)) ||
             (!strcmp(jstr(v, "status"), "insufficient") && !strcmp(jstr(v, "summary"), "资料不足")));
 }
 bool summary_apply(Library *l, J *source, J *v) {
@@ -688,11 +727,12 @@ bool summary_apply(Library *l, J *source, J *v) {
         return false;
     J *r = summary_target(l, source);
     char stamp[17];
-    repo_fingerprint(r, stamp);
+    summary_fingerprint(r, stamp);
     jtext(l, r, "ai_summary", jstr(v, "summary"));
     jtext(l, r, "summary_language", "zh");
     jtext(l, r, "summary_status", jstr(v, "status"));
     jtext(l, r, "summary_source", stamp);
+    yyjson_mut_obj_remove_str(r, "summary_requested");
     jnumber(l, r, "version", jnum(r, "version") + 1);
     library_touch(l);
     return true;
@@ -799,8 +839,8 @@ bool summary_accept(Library *l, J *batch, const char *json, char *e) {
                 r = candidate;
         }
         char input_stamp[17], current_stamp[17];
-        repo_fingerprint(r, input_stamp);
-        repo_fingerprint(summary_target(l, r), current_stamp);
+        summary_fingerprint(r, input_stamp);
+        summary_fingerprint(summary_target(l, r), current_stamp);
         if (!yyjson_mut_is_uint(jget(v, "id")) || !r || !summary_target(l, r) ||
             strcmp(input_stamp, current_stamp) || !valid_text(v, "status", 16) ||
             !valid_text(v, "summary", 600) || !chinese_text(jstr(v, "summary")) ||
@@ -810,7 +850,7 @@ bool summary_accept(Library *l, J *batch, const char *json, char *e) {
         if (!strcmp(jstr(v, "status"), "insufficient")) {
             if (strcmp(jstr(v, "summary"), "资料不足"))
                 goto bad;
-        } else if (!repo_has_material(r))
+        } else if (!summary_has_material(r))
             goto bad;
         for (size_t k = 0; k < i; k++)
             if (jnum(yyjson_mut_arr_get(items, k), "id") == id)
@@ -823,11 +863,12 @@ bool summary_accept(Library *l, J *batch, const char *json, char *e) {
                 source = yyjson_mut_arr_get(batch, k);
         J *r = summary_target(l, source);
         char stamp[17];
-        repo_fingerprint(r, stamp);
+        summary_fingerprint(r, stamp);
         jtext(l, r, "ai_summary", jstr(v, "summary"));
         jtext(l, r, "summary_language", "zh");
         jtext(l, r, "summary_status", jstr(v, "status"));
         jtext(l, r, "summary_source", stamp);
+        yyjson_mut_obj_remove_str(r, "summary_requested");
         jnumber(l, r, "version", jnum(r, "version") + 1);
     }
     library_touch(l);

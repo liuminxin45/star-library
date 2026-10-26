@@ -3,11 +3,13 @@ $ErrorActionPreference='Stop'
 $projectRoot=Split-Path -Parent $PSScriptRoot
 if (!$Executable) { $Executable=Join-Path $projectRoot 'StarLibrary.exe' }
 $Executable=(Resolve-Path -LiteralPath $Executable).Path
+$checkExecutable=Join-Path (Split-Path -Parent $Executable) 'StarLibrary-ui-test.exe'
+if (!(Test-Path -LiteralPath $checkExecutable)) { $checkExecutable=$Executable }
 $artifactRoot=Join-Path $projectRoot 'artifacts'
 New-Item -ItemType Directory -Path $artifactRoot -Force | Out-Null
 Add-Type -AssemblyName System.Drawing
 $reportPath=Join-Path $artifactRoot 'ui-tests.txt'
-$testApp=Start-Process -FilePath $Executable -ArgumentList @('--ui-test',('"'+$reportPath+'"')) -WindowStyle Normal -PassThru
+$testApp=Start-Process -FilePath $checkExecutable -ArgumentList @('--ui-test',('"'+$reportPath+'"')) -WindowStyle Hidden -PassThru
 if (!$testApp.WaitForExit(15000) -or $testApp.ExitCode -ne 0) { throw 'Native UI integration checks failed.' }
 Get-Content -LiteralPath $reportPath
 $views=@(
@@ -55,7 +57,7 @@ foreach ($view in $views) {
     $png=Join-Path $artifactRoot ($view.Name+'.png')
     $viewArgs=$view.Args+@('--capture',('"'+$bmp+'"'))
     for ($attempt=0; $attempt -lt 2; $attempt++) {
-        $captureApp=Start-Process -FilePath $Executable -ArgumentList $viewArgs -WindowStyle Normal -PassThru
+        $captureApp=Start-Process -FilePath $Executable -ArgumentList $viewArgs -WindowStyle Hidden -PassThru
         if ($captureApp.WaitForExit(20000)) {
             if ($captureApp.ExitCode -ne 0) { throw "Capture failed: $($view.Name), exit $($captureApp.ExitCode)" }
             break
