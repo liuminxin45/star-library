@@ -225,7 +225,26 @@ static int compare_ids(const void *a, const void *b) {
     uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b;
     return x < y ? -1 : x > y ? 1 : 0;
 }
+unsigned dimension_mask(J *dimensions) {
+    if (!yyjson_mut_is_arr(dimensions) || !yyjson_mut_arr_size(dimensions) ||
+        yyjson_mut_arr_size(dimensions) > 3)
+        return 0;
+    unsigned mask = 0;
+    size_t i, n;
+    J *v;
+    yyjson_mut_arr_foreach(dimensions, i, n, v) {
+        uint64_t id = yyjson_mut_get_uint(v);
+        if (!yyjson_mut_is_uint(v) || id >= 6 || (mask & (1u << id)))
+            return 0;
+        mask |= 1u << id;
+    }
+    return mask;
+}
 static bool discovery_fields_valid(J *r, bool required) {
+    if (jget(r, "profile_dimensions") &&
+        (!dimension_mask(jget(r, "profile_dimensions")) || !valid_text(r, "search_intent", 600) ||
+         !*jstr(r, "search_intent") || !valid_text(r, "query", 200) || !*jstr(r, "query")))
+        return false;
     bool present = jget(r, "hook") || jget(r, "try_idea") || jget(r, "discovery_lane");
     if (!present && !required)
         return true; /* Schema 1 legacy discovery. */
@@ -395,6 +414,34 @@ static bool evidence_valid(Library *l, J *a) {
                                            !find_repo(l, yyjson_mut_get_uint(v))) return false;
     return true;
 }
+static bool word_char(unsigned char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
+}
+bool text_mentions_repo(const char *text, J *repo) {
+    const char *full = jstr(repo, "full_name"), *slash = strchr(full, '/');
+    const char *name = slash ? slash + 1 : full;
+    size_t n = strlen(name), total = strlen(text);
+    if (*full && strstr(text, full))
+        return true;
+    if (n < 3 || n > total)
+        return false;
+    for (size_t i = 0; i <= total - n; i++)
+        if (!_strnicmp(text + i, name, n) && (!i || !word_char((unsigned char)text[i - 1])) &&
+            !word_char((unsigned char)text[i + n]))
+            return true;
+    return false;
+}
+char *profile_reflection(J *p) {
+    Buffer b = {0};
+    size_t i, n;
+    J *v;
+    yyjson_mut_arr_foreach(jget(p, "narrative"), i, n, v) buf_add(&b, jstr(v, "text"));
+    if (b.failed || !b.len) {
+        buf_drop(&b);
+        return NULL;
+    }
+    return b.data;
+}
 bool profile_validate_value(Library *l, J *p, char *e) {
     J *a, *v;
     size_t i, n;
@@ -445,6 +492,20 @@ bool profile_validate_value(Library *l, J *p, char *e) {
         }
     } else if (jget(p, "narrative"))
         goto bad;
+    if (!valid_text(p, "narrative_style", 32))
+        goto bad;
+    if (!strcmp(jstr(p, "narrative_style"), PROFILE_STYLE)) {
+        char *reflection = profile_reflection(p);
+        bool valid = reflection && strlen(reflection) <= 2400 &&
+                     !strpbrk(reflection, "0123456789/%\r\n");
+        J *repo;
+        yyjson_mut_arr_foreach(jget(root(l), "repos"), i, n, repo)
+            if (reflection && text_mentions_repo(reflection, repo))
+                valid = false;
+        mem_free(reflection);
+        if (!valid)
+            goto bad;
+    }
     return true;
 bad:
     error_set(e, 1024, "画像缺少有效字段或真实仓库证据，已保留上一份画像。");
@@ -839,18 +900,22 @@ bool profile_accept(Library *l, const char *json, char *e) {
     library_touch(l);
     return true;
 }
-static bool discovery_reason_valid(Library *l, const char *reason) {
-    J *profile = jget(root(l), "profile"), *v;
-    const char *keys[] = {"interests", "preferences"};
-    size_t i, n;
-    for (int k = 0; k < 2; k++) {
-        yyjson_mut_arr_foreach(jget(profile, keys[k]), i, n, v) {
-            const char *name = jstr(v, "name");
-            if (*name && strstr(reason, name))
-                return true;
-        }
+static bool discovery_association_valid(Library *l, J *candidate, J *answer) {
+    unsigned source = dimension_mask(jget(candidate, "profile_dimensions"));
+    unsigned selected = dimension_mask(jget(answer, "profile_dimensions")), counts[6];
+    if (!source || !selected || (selected & ~source) || !jget(answer, "summary"))
+        return false;
+    profile_counts(jget(root(l), "profile"), counts);
+    bool named = false;
+    for (unsigned k = 0; k < 6; k++) {
+        if (!(selected & (1u << k)))
+            continue;
+        if (!counts[k])
+            return false;
+        if (strstr(jstr(answer, "reason"), dimension_names[k]))
+            named = true;
     }
-    return false;
+    return named;
 }
 bool discovery_accept(Library *l, J *candidates, const char *json, char *e) {
     yyjson_doc *d = yyjson_read(json, strlen(json), 0);
@@ -883,7 +948,7 @@ bool discovery_accept(Library *l, J *candidates, const char *json, char *e) {
             break;
         }
         if (!candidate || !valid_text(v, "reason", 4096) || !*jstr(v, "reason") ||
-            !discovery_reason_valid(l, jstr(v, "reason")))
+            !discovery_association_valid(l, candidate, v))
             goto bad;
         /* Validate on a clone: partial answers never alter candidates or the old batch. */
         J *item = jclone(l, candidate);
@@ -893,6 +958,8 @@ bool discovery_accept(Library *l, J *candidates, const char *json, char *e) {
         jtext(l, item, "try_idea", jstr(v, "try_idea"));
         jtext(l, item, "discovery_lane", jstr(v, "discovery_lane"));
         jtext(l, item, "recommendation", jstr(v, "reason"));
+        if (jget(candidate, "profile_dimensions"))
+            jset(l, item, "profile_dimensions", jclone(l, jget(v, "profile_dimensions")));
         if (jget(v, "summary")) {
             if (!valid_text(v, "summary", 600) || !chinese_text(jstr(v, "summary")) ||
                 strpbrk(jstr(v, "summary"), "\r\n"))

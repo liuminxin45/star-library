@@ -61,8 +61,8 @@ jobs:
           @("Star Library $version", '', 'Windows 10/11 x64，下载 StarLibrary.exe 后双击运行。',
             '', "文件大小：$($exe.Length) 字节；无安装器、额外运行库或后台服务。",
             '', '包含 Star 管理、中文 AI 概括、可续接的兴趣分类与画像、项目发现。',
-            '', '旧发现记录缺少头像元数据时，也能加载所属账号的真实 GitHub 头像，图片请求不携带 Token。',
-            '', '补充真实兴趣画像与项目发现截图；快照预览使用本地头像缓存，隐藏窗口先加载缓存再截图。',
+            '', '画像收敛为一段向内探索的叙事和六条比例尺，分类进度逐项保存并可续接。',
+            '', '发现结合六维、收藏依据和反馈，由应用执行三路 GitHub 实搜；模型无需自带联网能力，无效结果保留上一批。',
             '', "Commit: $env:BUILD_SHA", "SHA-256: $hash") | Set-Content dist/release-notes.md -Encoding utf8
           "x64 $version : $($exe.Length) bytes" >> $env:GITHUB_STEP_SUMMARY
       - name: Upload release files

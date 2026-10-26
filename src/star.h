@@ -11,7 +11,8 @@
 #include "yyjson.h"
 
 #define APP_NAME L"Star Library"
-#define APP_VERSION "0.0.3"
+#define APP_VERSION "0.0.4"
+#define PROFILE_STYLE "reflective-v1"
 #define MAX_BODY (32u * 1024u * 1024u)
 #define MAX_REPOS 50000u
 #define WM_JOB (WM_APP + 1)
@@ -97,6 +98,9 @@ char *library_json(Library *lib, size_t *n);
 bool repo_annotate(Library *lib, uint64_t id, const char *tags, const char *note, char *error);
 bool profile_accept(Library *lib, const char *json, char *error);
 bool profile_validate_value(Library *lib, J *profile, char *error);
+char *profile_reflection(J *profile);
+bool text_mentions_repo(const char *text, J *repo);
+unsigned dimension_mask(J *dimensions);
 bool discovery_accept(Library *lib, J *candidates, const char *json, char *error);
 void library_demo(Library *lib);
 extern const char *dimension_names[6];
