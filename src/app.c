@@ -2008,6 +2008,12 @@ int ui_run(HINSTANCE instance, int show, const wchar_t *command) {
     a.capture_w = 1280;
     a.capture_h = 820;
     parse_args(command, data_dir);
+    if (a.test_preview && !*data_dir) {
+        wchar_t temporary[32768];
+        if (!GetTempPathW(32768, temporary))
+            return 1;
+        swprintf_s(data_dir, 32768, L"%sStarLibrary-preview-%lu", temporary, GetCurrentProcessId());
+    }
     bool arg_light = a.light;
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
@@ -2163,6 +2169,8 @@ int ui_run(HINSTANCE instance, int show, const wchar_t *command) {
                      SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
     }
     UpdateWindow(a.window);
+    if (a.storage.recovered)
+        notice("已恢复本地星库；旧文件和备份已保留。", true);
     SetTimer(a.window, 1, 1000, NULL);
     if (*a.capture)
         SetTimer(a.window, 2, 1200, NULL);
@@ -2333,6 +2341,7 @@ static void run_ui_tests(void) {
     LPARAM command_point =
         MAKELPARAM((int)((command.r.left + 20) * a.dpi / 96), (int)((command.r.top + 12) * a.dpi / 96));
     SendMessageW(a.window, WM_LBUTTONDOWN, MK_LBUTTON, command_point);
+    paint(); /* Hidden QA windows do not receive compositor-driven WM_PAINT. */
     ui_check(&report, "card command press stays separate from repository open",
              a.pressed_action == ACT_STAR && a.pressed_id == 1001 && pressed(ACT_STAR, 1001));
     SendMessageW(a.window, WM_LBUTTONUP, 0, MAKELPARAM(2, 2));
@@ -2399,6 +2408,7 @@ static void run_ui_tests(void) {
         LPARAM point = MAKELPARAM((int)((t.r.left + 20) * a.dpi / 96), (int)((t.r.top + 12) * a.dpi / 96));
         bool previous = a.light;
         SendMessageW(a.window, WM_LBUTTONDOWN, MK_LBUTTON, point);
+        paint();
         ui_check(&report, "button down has feedback before activation",
                  a.light == previous && a.pressed_action == ACT_THEME && pressed(ACT_THEME, 0));
         SendMessageW(a.window, WM_LBUTTONUP, 0, point);
@@ -2479,6 +2489,22 @@ static void run_ui_tests(void) {
                  !SendMessageW(a.window, WM_BATCH, 0, (LPARAM)&batch) && a.library.revision == revision);
     if (locked != INVALID_HANDLE_VALUE)
         CloseHandle(locked);
+    Library restarted = {0};
+    bool restart_ok = storage_load(&isolated, &restarted, save_error);
+    ui_check(&report, "restart restores saved repositories and profile",
+             restart_ok && yyjson_mut_arr_size(jget(root(&restarted), "repos")) ==
+                               yyjson_mut_arr_size(jget(root(&a.library), "repos")) &&
+                 !strcmp(jstr(jget(root(&restarted), "profile"), "summary"),
+                         jstr(jget(root(&a.library), "profile"), "summary")));
+    if (restart_ok) {
+        library_free(&a.library);
+        a.library = restarted;
+        memset(&restarted, 0, sizeof(restarted));
+        set_settings_edits();
+        rebuild_visible();
+        ui_check(&report, "restarted native cards match persisted data", a.visible_count > 0);
+    }
+    library_free(&restarted);
     a.storage = previous_storage;
     a.job = NULL;
     library_free(&batch.library);

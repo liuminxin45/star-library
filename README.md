@@ -1,6 +1,6 @@
 # Star Library
 
-一个小于 **1 MB** 的原生 Windows GitHub Stars 管理器。把收藏变成能浏览、能理解、能继续探索的个人星库。
+**300 多 KB，单文件 exe，带 AI 的 GitHub Stars 管理器。** 原生 Windows 界面，下载后双击运行：浏览和管理 Stars，用中文概括看懂项目，从收藏中生成兴趣画像，再发现值得尝试的项目。AI 接入你自己的模型服务，不内置模型。
 
 [下载 Windows x64 单文件程序](https://github.com/liuminxin45/star-library/releases/latest/download/StarLibrary.exe) · [版本发布](https://github.com/liuminxin45/star-library/releases) · [MIT License](LICENSE)
 
@@ -46,7 +46,7 @@ cd star-library
 .\build.cmd -Architecture x64 -Test
 ```
 
-产物为 `build\x64\StarLibrary.exe`，仅需分发这一个 exe。构建脚本会检查 1 MB 体积门槛及 DLL 依赖，拒绝额外的可分发运行库依赖。
+产物为 `build\x64\StarLibrary.exe`，同时更新项目根目录的 `StarLibrary.exe`；使用 `-NoInstall` 可只构建、不替换根目录程序。仅需分发这一个 exe。构建脚本会检查 1 MB 体积门槛及 DLL 依赖，拒绝额外的可分发运行库依赖。
 
 可选构建 x86：
 
@@ -54,7 +54,7 @@ cd star-library
 .\build.cmd -Architecture x86 -Test -NoInstall
 ```
 
-默认不指定架构时构建 x86，并在成功后更新项目根目录 exe；使用 `-NoInstall` 可保留正在使用的根目录程序。
+默认不指定架构时构建 x64，并在成功后更新项目根目录 exe；使用 `-NoInstall` 可保留正在使用的根目录程序。
 
 ### 原生 UI 检查
 
@@ -83,7 +83,11 @@ if ($app.ExitCode -ne 0) { throw 'UI checks failed' }
 
 ## 数据与快捷键
 
-默认数据目录为 `%LOCALAPPDATA%\StarLibrary`，包含 `library.json`、备份、加密凭据与头像缓存。数据和缓存不计入 exe 大小；头像磁盘缓存上限 20 MiB。断开 GitHub 只清除 GitHub 凭据，保留收藏与模型配置。
+默认数据目录为 `%USERPROFILE%\.star-library`，包含 `library.json`、备份、加密凭据与头像缓存。固定用户目录避免从打包应用和资源管理器启动时读取到不同的 AppData。
+
+首次升级会检查旧 `%LOCALAPPDATA%\StarLibrary` 和应用包缓存中的旧星库，同账号优先恢复非空、较新版本，保留原文件并复制加密凭据；不同账号不自动合并。现有新目录不会被迁移覆盖。主文件损坏或缺失时，只从通过完整校验的备份恢复，并保留损坏原件；读取或权限错误不会作为空库继续运行。
+
+数据和缓存不计入 exe 大小；头像磁盘缓存上限 20 MiB。断开 GitHub 只清除 GitHub 凭据，保留收藏与模型配置。
 
 ```powershell
 # 指定独立数据目录

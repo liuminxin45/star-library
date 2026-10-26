@@ -3,6 +3,7 @@
 #include <wincrypt.h>
 #include <string.h>
 #include <stdlib.h>
+#include <stdio.h>
 
 void storage_path(Storage *st, const wchar_t *name, wchar_t *out) {
     wcscpy_s(out, 32768, st->dir);
@@ -24,22 +25,30 @@ bool file_write(const wchar_t *path, const void *data, size_t n) {
 char *file_read(const wchar_t *path, size_t *n) {
     HANDLE f =
         CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-    LARGE_INTEGER size;
+    LARGE_INTEGER size = {0};
     char *p = NULL;
     DWORD got;
     if (f == INVALID_HANDLE_VALUE)
         return NULL;
-    if (GetFileSizeEx(f, &size) && size.QuadPart > 0 && size.QuadPart <= MAX_BODY) {
+    DWORD failure = ERROR_SUCCESS;
+    bool sized = GetFileSizeEx(f, &size) != 0;
+    if (sized && size.QuadPart > 0 && size.QuadPart <= MAX_BODY) {
         p = mem_alloc((size_t)size.QuadPart + 1);
         if (p && ReadFile(f, p, (DWORD)size.QuadPart, &got, NULL) && got == size.QuadPart) {
             if (n)
                 *n = got;
         } else {
+            failure = p ? GetLastError() : ERROR_NOT_ENOUGH_MEMORY;
+            if (!failure)
+                failure = ERROR_HANDLE_EOF;
             mem_free(p);
             p = NULL;
         }
-    }
+    } else
+        failure = !sized ? GetLastError() : size.QuadPart == 0 ? ERROR_HANDLE_EOF : ERROR_FILE_TOO_LARGE;
     CloseHandle(f);
+    if (!p)
+        SetLastError(failure);
     return p;
 }
 bool storage_init(Storage *st, const wchar_t *override_dir, char *e) {
@@ -48,9 +57,12 @@ bool storage_init(Storage *st, const wchar_t *override_dir, char *e) {
         if (!GetFullPathNameW(override_dir, 32768, st->dir, NULL))
             goto bad;
     } else {
-        if (FAILED(SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, NULL, SHGFP_TYPE_CURRENT, st->dir)))
+        /* AppData is redirected when launched by some packaged desktop hosts.
+           A profile-relative directory is shared with ordinary Explorer launches. */
+        if (FAILED(SHGetFolderPathW(NULL, CSIDL_PROFILE, NULL, SHGFP_TYPE_CURRENT, st->dir)))
             goto bad;
-        wcscat_s(st->dir, 32768, L"\\StarLibrary");
+        wcscat_s(st->dir, 32768, L"\\.star-library");
+        st->migrate_legacy = true;
     }
     SHCreateDirectoryExW(NULL, st->dir, NULL);
     DWORD attributes = GetFileAttributesW(st->dir);
@@ -61,20 +73,203 @@ bad:
     error_set(e, 1024, "无法创建数据目录。请选择可写位置。");
     return false;
 }
-bool storage_load(Storage *st, Library *lib, char *e) {
+typedef struct {
+    Library library;
+    wchar_t source[32768], dir[32768], pattern[32768], key[32768], temporary[32768], destination[32768];
+    bool saw_file, invalid, account_conflict;
+} Migration;
+static void migration_consider(Migration *migration, const wchar_t *dir) {
     wchar_t path[32768];
-    char *json;
-    size_t n;
-    storage_path(st, L"library.json", path);
-    if (GetFileAttributesW(path) == INVALID_FILE_ATTRIBUTES)
-        return library_new(lib);
-    json = file_read(path, &n);
-    if (!json) {
-        error_set(e, 1024, "无法读取收藏数据。原文件未被修改，请检查权限或备份。");
+    const wchar_t *files[] = {L"library.json", L"library.json.bak"};
+    for (int i = 0; i < 2; i++) {
+        swprintf_s(path, 32768, L"%s\\%s", dir, files[i]);
+        if (GetFileAttributesW(path) == INVALID_FILE_ATTRIBUTES) {
+            DWORD status = GetLastError();
+            if (status != ERROR_FILE_NOT_FOUND && status != ERROR_PATH_NOT_FOUND)
+                migration->invalid = true;
+            continue;
+        }
+        migration->saw_file = true;
+        size_t size;
+        char error[1024], *json = file_read(path, &size);
+        Library candidate = {0};
+        bool valid = json && library_parse(&candidate, json, size, error);
+        mem_free(json);
+        if (!valid) {
+            migration->invalid = true;
+            continue;
+        }
+        J *before = root(&migration->library), *next = root(&candidate);
+        const char *account = jstr(before, "account"), *incoming = jstr(next, "account");
+        if (*account && *incoming && _stricmp(account, incoming))
+            migration->account_conflict = true;
+        bool empty = !yyjson_mut_arr_size(jget(before, "repos"));
+        bool nonempty = yyjson_mut_arr_size(jget(next, "repos")) > 0;
+        if (!migration->library.doc || (empty && nonempty) ||
+            (empty == !nonempty && candidate.revision > migration->library.revision)) {
+            library_free(&migration->library);
+            migration->library = candidate;
+            memset(&candidate, 0, sizeof(candidate));
+            wcscpy_s(migration->source, 32768, dir);
+        }
+        library_free(&candidate);
+        break; /* A valid primary takes precedence over its older backup. */
+    }
+}
+bool storage_migrate_from(Storage *st, const wchar_t *old_local, Library *lib, char *e) {
+    Migration *migration = mem_alloc(sizeof(*migration));
+    bool ok = false;
+    if (!migration) {
+        error_set(e, 1024, "内存不足，旧星库未被修改。");
         return false;
     }
-    bool ok = library_parse(lib, json, n, e);
+    wchar_t *dir = migration->dir, *pattern = migration->pattern;
+    wchar_t *key = migration->key, *temporary = migration->temporary, *destination = migration->destination;
+    storage_path(st, L"library.json", destination);
+    if (GetFileAttributesW(destination) != INVALID_FILE_ATTRIBUTES ||
+        (GetLastError() != ERROR_FILE_NOT_FOUND && GetLastError() != ERROR_PATH_NOT_FOUND)) {
+        error_set(e, 1024, "目标星库已存在或无法访问，未覆盖。");
+        goto end;
+    }
+    swprintf_s(dir, 32768, L"%s\\StarLibrary", old_local);
+    migration_consider(migration, dir);
+    swprintf_s(pattern, 32768, L"%s\\Packages\\*", old_local);
+    WIN32_FIND_DATAW entry;
+    HANDLE search = FindFirstFileW(pattern, &entry);
+    if (search != INVALID_HANDLE_VALUE) {
+        do {
+            if (!(entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || entry.cFileName[0] == L'.')
+                continue;
+            swprintf_s(dir, 32768, L"%s\\Packages\\%s\\LocalCache\\Local\\StarLibrary", old_local,
+                       entry.cFileName);
+            migration_consider(migration, dir);
+        } while (FindNextFileW(search, &entry));
+        FindClose(search);
+    }
+    if (migration->account_conflict) {
+        error_set(e, 1024, "找到多个 GitHub 账号的旧星库，未自动合并。请用 --data-dir 选择原数据目录。");
+        goto end;
+    }
+    if (!migration->saw_file && !migration->invalid) {
+        ok = library_new(lib);
+        goto end;
+    }
+    if (!migration->library.doc || (migration->invalid &&
+            !yyjson_mut_arr_size(jget(root(&migration->library), "repos")))) {
+        error_set(e, 1024, "旧星库读取失败，未创建空库或覆盖原文件。请检查旧数据及备份。");
+        goto end;
+    }
+    /* Copy encrypted credentials as opaque bytes; no decryption or model calls
+       are needed for migration. The source directory is never changed. */
+    swprintf_s(key, 32768, L"%s\\credentials.bin", migration->source);
+    DWORD attributes = GetFileAttributesW(key), status = GetLastError();
+    if (attributes != INVALID_FILE_ATTRIBUTES) {
+        storage_path(st, L"credentials.bin.migrate.tmp", temporary);
+        storage_path(st, L"credentials.bin", destination);
+        if (!CopyFileW(key, temporary, FALSE) ||
+            !MoveFileExW(temporary, destination, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+            goto failed;
+    } else if (status != ERROR_FILE_NOT_FOUND && status != ERROR_PATH_NOT_FOUND)
+        goto failed;
+    size_t size;
+    char *json = library_json(&migration->library, &size);
+    storage_path(st, L"library.json.bak", destination);
+    bool backed_up = json && file_write(destination, json, size);
+    free(json);
+    if (!backed_up || !storage_save(st, &migration->library, e))
+        goto failed;
+    library_free(lib);
+    *lib = migration->library;
+    memset(&migration->library, 0, sizeof(migration->library));
+    st->recovered = true;
+    if (e)
+        *e = 0;
+    ok = true;
+    goto end;
+failed:
+    error_set(e, 1024, "旧星库迁移未完成，原数据和加密凭据已保留。请检查新目录权限。");
+end:
+    library_free(&migration->library);
+    mem_free(migration);
+    return ok;
+}
+static bool storage_load_impl(Storage *st, Library *lib, char *e, wchar_t *paths) {
+    wchar_t *path = paths, *backup = paths + 32768, *temporary = paths + 65536;
+    wchar_t *original = paths + 98304, *old_local = paths + 131072, name[128];
+    char *json;
+    size_t n;
+    Library recovered = {0};
+    st->recovered = false;
+    storage_path(st, L"library.json", path);
+    DWORD attributes = GetFileAttributesW(path), status = GetLastError();
+    bool missing = attributes == INVALID_FILE_ATTRIBUTES;
+    if (missing && status != ERROR_FILE_NOT_FOUND && status != ERROR_PATH_NOT_FOUND) {
+        error_set(e, 1024, "无法访问星库文件，未创建空库。请检查数据目录权限。");
+        return false;
+    }
+    storage_path(st, L"library.json.bak", backup);
+    if (missing) {
+        if (GetFileAttributesW(backup) == INVALID_FILE_ATTRIBUTES) {
+            status = GetLastError();
+            if (status == ERROR_FILE_NOT_FOUND || status == ERROR_PATH_NOT_FOUND) {
+                if (st->migrate_legacy) {
+                    if (FAILED(SHGetFolderPathW(NULL, CSIDL_PROFILE, NULL, SHGFP_TYPE_CURRENT, old_local)))
+                        return false;
+                    wcscat_s(old_local, 32768, L"\\AppData\\Local");
+                    return storage_migrate_from(st, old_local, lib, e);
+                }
+                return library_new(lib);
+            }
+            error_set(e, 1024, "无法访问星库备份，未创建空库。");
+            return false;
+        }
+    } else {
+        json = file_read(path, &n);
+        if (!json && GetLastError() != ERROR_HANDLE_EOF && GetLastError() != ERROR_FILE_TOO_LARGE) {
+            error_set(e, 1024, "无法读取星库数据。原文件未被修改，请检查权限或备份。");
+            return false;
+        }
+        bool ok = json && library_parse(lib, json, n, e);
+        mem_free(json);
+        if (ok)
+            return true;
+    }
+    /* Recover only a fully validated backup. Never replace the backup with the
+       unreadable original, or turn a read/permission failure into a new library. */
+    json = file_read(backup, &n);
+    bool valid = json && library_parse(&recovered, json, n, e);
     mem_free(json);
+    if (!valid) {
+        error_set(e, 1024, "星库或备份无效，原文件已保留。请从导出文件恢复，勿重新同步覆盖。");
+        return false;
+    }
+    storage_path(st, L"library.json.restore.tmp", temporary);
+    swprintf_s(name, 128, L"library.json.unreadable-%llu-%lu.bak",
+               (unsigned long long)GetTickCount64(), GetCurrentProcessId());
+    storage_path(st, name, original);
+    bool restored = CopyFileW(backup, temporary, FALSE) &&
+                    (missing ? MoveFileExW(temporary, path, MOVEFILE_WRITE_THROUGH)
+                             : ReplaceFileW(path, temporary, original, 0, NULL, NULL));
+    if (!restored) {
+        library_free(&recovered);
+        error_set(e, 1024, "备份有效，但恢复写入失败。原文件和备份保留，请检查数据目录权限。");
+        return false;
+    }
+    library_free(lib);
+    *lib = recovered;
+    st->recovered = true;
+    if (e)
+        *e = 0;
+    return true;
+}
+bool storage_load(Storage *st, Library *lib, char *e) {
+    wchar_t *paths = mem_alloc(5u * 32768u * sizeof(wchar_t));
+    if (!paths) {
+        error_set(e, 1024, "内存不足，星库未被修改。");
+        return false;
+    }
+    bool ok = storage_load_impl(st, lib, e, paths);
+    mem_free(paths);
     return ok;
 }
 bool storage_save(Storage *st, Library *lib, char *e) {

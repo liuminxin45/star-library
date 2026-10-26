@@ -11,7 +11,7 @@
 #include "yyjson.h"
 
 #define APP_NAME L"Star Library"
-#define APP_VERSION "0.0.1"
+#define APP_VERSION "0.0.2"
 #define MAX_BODY (32u * 1024u * 1024u)
 #define MAX_REPOS 50000u
 #define WM_JOB (WM_APP + 1)
@@ -32,7 +32,7 @@ typedef struct {
 typedef struct {
     wchar_t dir[32768];
     char *github_key, *ai_key;
-    bool demo;
+    bool demo, recovered, migrate_legacy;
 } Storage;
 typedef struct {
     const wchar_t *method;
@@ -120,6 +120,7 @@ bool storage_commit(Storage *st, Library *next, Library *previous, const char *g
 
 bool storage_init(Storage *st, const wchar_t *override_dir, char *error);
 bool storage_load(Storage *st, Library *lib, char *error);
+bool storage_migrate_from(Storage *st, const wchar_t *old_local, Library *lib, char *error);
 bool storage_save(Storage *st, Library *lib, char *error);
 bool storage_keys_save(Storage *st, char *error);
 void storage_keys_load(Storage *st);

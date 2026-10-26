@@ -1311,6 +1311,121 @@ static void test_endpoints_and_partial_results(void) {
     UnregisterClassW(klass.lpszClassName, klass.hInstance);
     library_free(&l);
 }
+static void test_storage_migration(void) {
+    Storage *stores = mem_alloc(5 * sizeof(Storage));
+    Library full = {0}, empty = {0}, restored = {0};
+    wchar_t local[512], dir[1024], file[32768], source[32768];
+    char error[1024] = {0};
+    CHECK(stores != NULL);
+    if (!stores)
+        return;
+    swprintf_s(local, 512, L"artifacts\\migration-%lu\\old-local", GetCurrentProcessId());
+    swprintf_s(dir, 1024, L"%s\\StarLibrary", local);
+    CHECK(storage_init(&stores[0], dir, error));
+    CHECK(library_new(&empty));
+    jtext(&empty, root(&empty), "account", "preview");
+    jnumber(&empty, root(&empty), "revision", 1000);
+    CHECK(storage_save(&stores[0], &empty, error));
+    swprintf_s(dir, 1024, L"%s\\Packages\\Example.Host\\LocalCache\\Local\\StarLibrary", local);
+    CHECK(storage_init(&stores[1], dir, error));
+    CHECK(library_new(&full));
+    library_demo(&full);
+    CHECK(profile_accept(&full, profile_json, error));
+    jtext(&full, find_repo(&full, 1001), "ai_summary", "迁移保留中文概括");
+    CHECK(storage_save(&stores[1], &full, error));
+    storage_path(&stores[1], L"credentials.bin", source);
+    CHECK(file_write(source, "opaque-encrypted-fixture", 24));
+    swprintf_s(dir, 1024, L"artifacts\\migration-%lu\\stable", GetCurrentProcessId());
+    CHECK(storage_init(&stores[2], dir, error));
+    CHECK(storage_migrate_from(&stores[2], local, &restored, error) && stores[2].recovered);
+    CHECK(find_repo(&restored, 1001) && yyjson_mut_is_obj(jget(root(&restored), "profile")));
+    CHECK(!strcmp(jstr(find_repo(&restored, 1001), "ai_summary"), "迁移保留中文概括"));
+    storage_path(&stores[2], L"credentials.bin", file);
+    size_t bytes;
+    char *data = file_read(file, &bytes);
+    CHECK(data && bytes == 24 && !memcmp(data, "opaque-encrypted-fixture", 24));
+    mem_free(data);
+    CHECK(GetFileAttributesW(source) != INVALID_FILE_ATTRIBUTES);
+    CHECK(!storage_migrate_from(&stores[2], local, &restored, error));
+    CHECK(storage_load(&stores[2], &restored, error) && find_repo(&restored, 1001));
+    storage_path(&stores[0], L"library.json", file);
+    CHECK(file_write(file, "{broken", 7));
+    swprintf_s(dir, 1024, L"artifacts\\migration-%lu\\skip-broken", GetCurrentProcessId());
+    CHECK(storage_init(&stores[3], dir, error));
+    CHECK(storage_migrate_from(&stores[3], local, &restored, error) && find_repo(&restored, 1001));
+    jtext(&full, root(&full), "account", "other-account");
+    swprintf_s(dir, 1024, L"%s\\Packages\\Another.Host\\LocalCache\\Local\\StarLibrary", local);
+    CHECK(storage_init(&stores[4], dir, error) && storage_save(&stores[4], &full, error));
+    swprintf_s(dir, 1024, L"artifacts\\migration-%lu\\conflict", GetCurrentProcessId());
+    CHECK(storage_init(&stores[3], dir, error));
+    CHECK(!storage_migrate_from(&stores[3], local, &restored, error));
+    CHECK(!strcmp(jstr(root(&restored), "account"), "preview"));
+    storage_path(&stores[3], L"library.json", file);
+    CHECK(GetFileAttributesW(file) == INVALID_FILE_ATTRIBUTES);
+    library_free(&restored);
+    library_free(&empty);
+    library_free(&full);
+    mem_free(stores);
+}
+static void test_storage_restart(void) {
+    Library written = {0}, loaded = {0};
+    Storage storage = {0};
+    wchar_t dir[512], path[32768], backup[32768];
+    char error[1024] = {0};
+    swprintf_s(dir, 512, L"artifacts\\restart-%lu", GetCurrentProcessId());
+    CHECK(storage_init(&storage, dir, error));
+    CHECK(library_new(&written));
+    library_demo(&written);
+    CHECK(profile_accept(&written, profile_json, error));
+    jtext(&written, find_repo(&written, 1001), "ai_summary", "重启后仍然保留的中文概括。");
+    jtext(&written, jget(root(&written), "settings"), "ai_url", "https://example.com/v1/chat/completions");
+    jtext(&written, jget(root(&written), "settings"), "ai_model", "saved-model");
+    CHECK(storage_save(&storage, &written, error));
+    CHECK(storage_save(&storage, &written, error));
+    CHECK(storage_load(&storage, &loaded, error) && !storage.recovered);
+    CHECK(!strcmp(jstr(find_repo(&loaded, 1001), "ai_summary"), "重启后仍然保留的中文概括。"));
+    CHECK(!strcmp(jstr(jget(root(&loaded), "settings"), "ai_model"), "saved-model"));
+    CHECK(yyjson_mut_is_obj(jget(root(&loaded), "profile")));
+    storage_path(&storage, L"library.json", path);
+    storage_path(&storage, L"library.json.bak", backup);
+    CHECK(file_write(path, "{broken", 7));
+    CHECK(storage_load(&storage, &loaded, error) && storage.recovered && !*error);
+    CHECK(find_repo(&loaded, 1001) && yyjson_mut_is_obj(jget(root(&loaded), "profile")));
+    wchar_t pattern[32768];
+    storage_path(&storage, L"library.json.unreadable-*.bak", pattern);
+    WIN32_FIND_DATAW info;
+    HANDLE archive = FindFirstFileW(pattern, &info);
+    CHECK(archive != INVALID_HANDLE_VALUE);
+    if (archive != INVALID_HANDLE_VALUE) {
+        wchar_t archived[32768];
+        storage_path(&storage, info.cFileName, archived);
+        size_t n;
+        char *text = file_read(archived, &n);
+        CHECK(text && n == 7 && !memcmp(text, "{broken", 7));
+        mem_free(text);
+        FindClose(archive);
+    }
+    CHECK(DeleteFileW(path));
+    CHECK(storage_load(&storage, &loaded, error) && storage.recovered);
+    CHECK(find_repo(&loaded, 1001));
+    CHECK(file_write(path, "", 0));
+    CHECK(storage_load(&storage, &loaded, error) && storage.recovered && find_repo(&loaded, 1001));
+    HANDLE lock = CreateFileW(path, GENERIC_READ, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    CHECK(lock != INVALID_HANDLE_VALUE);
+    CHECK(!storage_load(&storage, &loaded, error) && find_repo(&loaded, 1001));
+    if (lock != INVALID_HANDLE_VALUE)
+        CloseHandle(lock);
+    CHECK(file_write(path, "{broken", 7) && file_write(backup, "{bad", 4));
+    CHECK(!storage_load(&storage, &loaded, error) && find_repo(&loaded, 1001));
+    size_t n;
+    char *text = file_read(path, &n);
+    CHECK(text && n == 7 && !memcmp(text, "{broken", 7));
+    mem_free(text);
+    CHECK(DeleteFileW(path));
+    CHECK(!storage_load(&storage, &loaded, error) && find_repo(&loaded, 1001));
+    library_free(&loaded);
+    library_free(&written);
+}
 int main(int argc, char **argv) {
     if (argc > 1 && !strcmp(argv[1], "--live")) {
         const char *token = getenv("GITHUB_TOKEN");
@@ -1335,6 +1450,8 @@ int main(int argc, char **argv) {
     }
     test_endpoints_and_partial_results();
     test_profile_resume();
+    test_storage_restart();
+    test_storage_migration();
     Library l = {0}, copy = {0};
     char error[1024] = {0};
     CHECK(library_new(&l));

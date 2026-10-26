@@ -1,5 +1,5 @@
 param(
-    [ValidateSet('x64','x86')][string]$Architecture = 'x86',
+    [ValidateSet('x64','x86')][string]$Architecture = 'x64',
     [switch]$FastJsonNumbers,
     [switch]$Test,
     [switch]$NoInstall
@@ -43,7 +43,7 @@ try {
         & "$outDir\tests.exe"
         if ($LASTEXITCODE -ne 0) { throw 'Tests failed.' }
     }
-    if ($Architecture -eq 'x86' -and !$FastJsonNumbers -and !$NoInstall) {
+    if (!$FastJsonNumbers -and !$NoInstall) {
         Copy-Item -LiteralPath $exe.FullName -Destination (Join-Path $projectRoot 'StarLibrary.exe') -Force
     }
     [PSCustomObject]@{ Architecture=$Architecture; Bytes=$exe.Length; Limit=1000000; Path=$exe.FullName } | Format-List
