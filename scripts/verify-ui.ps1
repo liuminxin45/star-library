@@ -1,11 +1,12 @@
-param([string]$Executable)
+param([string]$Executable, [string]$ArtifactRoot)
 $ErrorActionPreference='Stop'
 $projectRoot=Split-Path -Parent $PSScriptRoot
 if (!$Executable) { $Executable=Join-Path $projectRoot 'StarLibrary.exe' }
 $Executable=(Resolve-Path -LiteralPath $Executable).Path
 $checkExecutable=Join-Path (Split-Path -Parent $Executable) 'StarLibrary-ui-test.exe'
 if (!(Test-Path -LiteralPath $checkExecutable)) { $checkExecutable=$Executable }
-$artifactRoot=Join-Path $projectRoot 'artifacts'
+if (!$ArtifactRoot) { $ArtifactRoot=Join-Path $projectRoot 'artifacts' }
+$artifactRoot=[IO.Path]::GetFullPath($ArtifactRoot)
 New-Item -ItemType Directory -Path $artifactRoot -Force | Out-Null
 Add-Type -AssemblyName System.Drawing
 $reportPath=Join-Path $artifactRoot 'ui-tests.txt'

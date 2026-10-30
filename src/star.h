@@ -11,7 +11,7 @@
 #include "yyjson.h"
 
 #define APP_NAME L"Star Library"
-#define APP_VERSION "0.0.10"
+#define APP_VERSION "0.0.11"
 #define PROFILE_STYLE "reflective-v1"
 #define MAX_BODY (32u * 1024u * 1024u)
 #define MAX_REPOS 50000u

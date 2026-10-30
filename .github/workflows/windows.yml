@@ -27,20 +27,14 @@ jobs:
       - name: Build and test x64
         shell: pwsh
         run: ./scripts/build.ps1 -Architecture x64 -Test -NoInstall
-      - name: Native UI checks
+      - name: Build and test x86
+        shell: pwsh
+        run: ./scripts/build.ps1 -Architecture x86 -Test -NoInstall
+      - name: Packaging regression checks
         shell: pwsh
         run: |
-          $ErrorActionPreference = 'Stop'
-          $report = Join-Path $PWD 'artifacts/ui-x64.txt'
-          New-Item -ItemType Directory -Path artifacts -Force | Out-Null
-          $app = Start-Process -FilePath ./build/x64/StarLibrary-ui-test.exe -ArgumentList @('--ui-test', ('"' + $report + '"')) -WindowStyle Hidden -PassThru
-          if (!$app.WaitForExit(60000)) { $app.Kill(); throw 'UI checks timed out.' }
-          Get-Content -LiteralPath $report
-          if ($app.ExitCode -ne 0) { throw 'UI checks failed.' }
-          $report = Join-Path $PWD 'artifacts/ui-x64-release.txt'
-          $app = Start-Process -FilePath ./build/x64/StarLibrary.exe -ArgumentList @('--ui-test', ('"' + $report + '"')) -WindowStyle Hidden -PassThru
-          if (!$app.WaitForExit(60000) -or $app.ExitCode -ne 0) { throw 'Release UI checks failed.' }
-          Get-Content -LiteralPath $report
+          ./tests/test-packaging.ps1 -Architecture x64
+          ./tests/test-packaging.ps1 -Architecture x86
       - name: Package single executable
         shell: pwsh
         env:
@@ -50,6 +44,10 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $exe = Get-Item ./build/x64/StarLibrary.exe
+          $packing = @(Get-Content ./build/x64/packing.json -Raw | ConvertFrom-Json)
+          if (!$packing[0].ExactRoundtrip -or $packing[0].PackedSha256 -ne (Get-FileHash $exe.FullName).Hash) {
+            throw 'Executable does not match the verified UPX artifact.'
+          }
           if ($exe.Length -gt 400000) { throw 'Executable exceeds 400,000 bytes.' }
           $bytes = [IO.File]::ReadAllBytes($exe.FullName)
           $pe = [BitConverter]::ToInt32($bytes, 0x3c)
@@ -69,6 +67,12 @@ jobs:
             '', $changes,
             '', "Commit: $env:BUILD_SHA", "SHA-256: $hash") | Set-Content dist/release-notes.md -Encoding utf8
           "x64 $version : $($exe.Length) bytes" >> $env:GITHUB_STEP_SUMMARY
+      - name: Scan release when Defender is available
+        shell: pwsh
+        run: |
+          ./scripts/scan-release.ps1 -Executable ./dist/StarLibrary.exe -Report ./artifacts/defender-scan.json
+          $scan = Get-Content ./artifacts/defender-scan.json -Raw | ConvertFrom-Json
+          "Defender scan: $($scan.Status). $($scan.Reason)" >> $env:GITHUB_STEP_SUMMARY
       - name: Upload release files
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
@@ -82,9 +86,18 @@ jobs:
         with:
           name: windows-x64-validation
           path: |
-            artifacts/ui-x64.txt
-            artifacts/ui-x64-release.txt
+            build/x64/packing.json
+            build/x64/core-results.txt
+            build/x64/ui-results.txt
+            build/x64/ui-release-results.txt
             build/x64/dependencies.txt
+            build/x64/dependencies-unpacked.txt
+            build/x86/packing.json
+            build/x86/core-results.txt
+            build/x86/ui-results.txt
+            build/x86/ui-release-results.txt
+            build/x86/dependencies.txt
+            artifacts/defender-scan.json*
           if-no-files-found: ignore
 
   release:

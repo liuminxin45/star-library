@@ -4,7 +4,7 @@
 
 把收藏过的项目整理成中文项目库：看懂项目用途、搜索已有收藏，再根据兴趣发现值得尝试的新工具。
 
-**不到 400 KB · Windows 原生 · 单文件免安装 · 免费开源**
+**约 167 KB · Windows 原生 · 单文件免安装 · 免费开源**
 
 [下载 Windows x64](https://github.com/liuminxin45/star-library/releases/latest/download/StarLibrary.exe) · [版本与校验值](https://github.com/liuminxin45/star-library/releases/latest) · [使用说明](docs/build-and-usage.md) · [English](README.en.md)
 
@@ -78,7 +78,7 @@
 .\build.cmd -Architecture x64 -Test
 ```
 
-正式分发仅需 `StarLibrary.exe`，构建检查不超过 400,000 字节，仅依赖 Windows 系统 DLL。[完整构建与测试说明](docs/build-and-usage.md)。
+正式分发仅需 `StarLibrary.exe`，当前 x64 版经 UPX 压缩约 167 KB，仅依赖 Windows 系统 DLL。构建验证解压还原一致性并保留 400,000 字节上限。[完整构建与测试说明](docs/build-and-usage.md)。
 
 ## 反馈与支持
 

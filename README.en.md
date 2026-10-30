@@ -4,7 +4,7 @@
 
 Browse your saved repositories with AI-generated Chinese summaries, explore your interests, and discover useful tools based on what you star.
 
-**Under 400 KB · Native Windows · Portable single executable · Free and open source**
+**About 167 KB · Native Windows · Portable single executable · Free and open source**
 
 [Download for Windows x64](https://github.com/liuminxin45/star-library/releases/latest/download/StarLibrary.exe) · [Releases & checksums](https://github.com/liuminxin45/star-library/releases/latest) · [简体中文](README.md)
 
@@ -58,7 +58,7 @@ Implemented in C17 with Win32, Direct2D, and DirectWrite. Install Visual Studio 
 .\build.cmd -Architecture x64 -Test
 ```
 
-Only `StarLibrary.exe` is needed for distribution. The build enforces a 400,000-byte limit and Windows system DLL dependencies. See the [full build and test guide](docs/build-and-usage.md).
+Only `StarLibrary.exe` is needed for distribution. The current x64 release is about 167 KB with UPX compression and requires only Windows system DLLs. The build verifies exact decompression and enforces a 400,000-byte limit. See the [full build and test guide](docs/build-and-usage.md).
 
 ## Feedback and support
 
