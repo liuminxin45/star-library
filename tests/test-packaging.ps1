@@ -53,3 +53,6 @@ try {
 } finally { $ErrorActionPreference = $previousErrorPreference }
 Assert-Check ($wrapperExit -eq 1) 'build entrypoint propagates argument validation failure'
 "$script:checks packaging checks passed ($Architecture)."
+# The deliberately rejected child process leaves LASTEXITCODE=1. Report the
+# test suite's success explicitly so CI does not reuse that expected failure.
+exit 0
