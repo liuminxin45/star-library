@@ -1,12 +1,14 @@
 # Star Library
 
-**让 GitHub Stars 不再吃灰。**
+**约 167 KB 的 GitHub Stars 管理器，让收藏不再吃灰。**
 
 把收藏过的项目整理成中文项目库：看懂项目用途、搜索已有收藏，再根据兴趣发现值得尝试的新工具。
 
-**约 167 KB · Windows 原生 · 单文件免安装 · 免费开源**
+**Windows 原生 · 单文件免安装 · 免费开源**
 
 [下载 Windows x64](https://github.com/liuminxin45/star-library/releases/latest/download/StarLibrary.exe) · [版本与校验值](https://github.com/liuminxin45/star-library/releases/latest) · [使用说明](docs/build-and-usage.md) · [English](README.en.md)
+
+当前 [0.0.11 x64 发布版](https://github.com/liuminxin45/star-library/releases/tag/0.0.11)仅 166,912 字节（约 167 KB），经 UPX 压缩，下载一个 exe 即可使用。
 
 适用于 Windows 10/11，无需额外运行环境。GitHub 同步需要你自己的 Token；AI 功能需要自行配置兼容 Chat Completions 的模型服务，可能产生服务费用。
 

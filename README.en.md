@@ -1,12 +1,14 @@
 # Star Library
 
-**Put your GitHub Stars back to use.**
+**A GitHub Stars manager in about 167 KB.**
 
 Browse your saved repositories with AI-generated Chinese summaries, explore your interests, and discover useful tools based on what you star.
 
-**About 167 KB · Native Windows · Portable single executable · Free and open source**
+**Native Windows · Portable single executable · Free and open source**
 
 [Download for Windows x64](https://github.com/liuminxin45/star-library/releases/latest/download/StarLibrary.exe) · [Releases & checksums](https://github.com/liuminxin45/star-library/releases/latest) · [简体中文](README.md)
+
+The current [0.0.11 x64 release](https://github.com/liuminxin45/star-library/releases/tag/0.0.11) is 166,912 bytes (about 167 KB), compressed with UPX. Download one executable and run it.
 
 Runs on Windows 10/11 with no additional runtime. The interface and AI summaries are primarily in Chinese. GitHub features require your own token; AI features require a separately configured Chat Completions-compatible service, which may charge for usage.
 

@@ -4,7 +4,9 @@
 
 三张配图已更新为 0.0.8 的真实运行截图。发现页来自手动“换一批”后保存的四个 AI 工具推荐，包含真实 GitHub 头像，未使用演示数据。
 
-标题建议：**〖开发者自荐〗Star Library：约 167 KB 的 GitHub Stars 管理器，带 AI 整理与兴趣画像**
+体积已按 0.0.11 的 x64 发布附件核验：166,912 字节（约 167 KB），使用 UPX 压缩。
+
+标题建议：**〖开源自荐〗Star Library：约 167 KB 的 GitHub Stars 单 exe 管理器，带 AI 中文概括与兴趣画像**
 
 ---
 
@@ -14,7 +16,7 @@ Star Library
 
 ## 一句简介
 
-约 167 KB 的单文件 Windows 程序，管理 GitHub Stars，用 AI 看懂项目、回看兴趣，并发现下一件想试的东西。
+一个约 167 KB 的 Windows 单 exe，管理 GitHub Stars，用 AI 看懂项目、回看收藏兴趣，并发现下一件想试的工具。
 
 ## 应用平台
 
@@ -37,11 +39,13 @@ Windows 10 / 11，x64，中文界面。
 - **从收藏里认识兴趣**：用一段面向好奇心、学习与日常选择的叙事，回看六种兴趣倾向；点击比例尺可查看收藏依据。它不是能力或人格测评。
 - **发现项目**：结合真实收藏主题和六维画像搜索 GitHub，从至少 100 Stars 的候选中精选最多六项实用工具；同等关联下优先高 Stars，“不感兴趣”会排除该仓库并降低相似主题的后续权重。过滤练习题、课程和项目点子清单。无需模型自带联网能力。
 
-一个经 UPX 压缩约 167 KB 的 exe，免安装，不需要 Node、Python、WebView2 或后台服务。收藏、概括和画像保存在本地，支持 JSON 导入导出，断网也能浏览已有内容。
+现在的 x64 发布版只有 166,912 字节（约 167 KB），经 UPX 压缩。下载一个 exe 即可使用，免安装，不需要 Node、Python、WebView2 或后台服务。
+
+收藏、概括和画像保存在本地，支持 JSON 导入导出，断网也能浏览已有内容。
 
 设置页自动检查新版本，有更新时才显示按钮，点击前往 GitHub Release。也提供了“★ Star me”，已连接 GitHub 时可直接 Star 本项目并打开项目页，已经 Star 则直接打开。
 
-使用前需要 GitHub 账号与有 Starring 读写权限的 Token。AI 不内置模型，支持兼容 Chat Completions 的接口；执行 AI 分析时，相关仓库元数据（包括私有仓库）会发送给你配置的模型服务。
+使用前需要 GitHub 账号与有 Starring 读写权限的 Token。AI 不内置模型，支持兼容 Chat Completions 的接口。执行 AI 分析时，相关公开及私有仓库元数据，以及概括所需的限长 README 节选，会发送给你配置的模型服务。
 
 ![我的真实星库](https://raw.githubusercontent.com/liuminxin45/star-library/main/docs/images/library.png)
 
