@@ -44,4 +44,12 @@ try {
 } finally {
     [Environment]::SetEnvironmentVariable('UPX', $oldEnvironment, 'Process')
 }
+$wrapperExit = $null
+$previousErrorPreference = $ErrorActionPreference
+try {
+    $ErrorActionPreference = 'Continue'
+    & (Join-Path $projectRoot 'build.cmd') -Architecture invalid *> (Join-Path $folder 'invalid-architecture.log')
+    $wrapperExit = $LASTEXITCODE
+} finally { $ErrorActionPreference = $previousErrorPreference }
+Assert-Check ($wrapperExit -eq 1) 'build entrypoint propagates argument validation failure'
 "$script:checks packaging checks passed ($Architecture)."
