@@ -14,6 +14,14 @@
 
 ![Star Library 星库：用中文概括浏览收藏的 GitHub 项目](docs/images/library.png)
 
+Star Library is a native Windows GitHub Stars manager with a local repository library, search and filters, optional AI-generated Chinese summaries, interest profiles, and project discovery.
+
+## 与 GitHub 收藏列表怎样配合
+
+GitHub 继续保存你的 Star 关系；Star Library 在本机维护可搜索的项目库、概括和兴趣资料。同步后可以离线浏览已有数据，再按需运行 AI 整理。
+
+它不提供内置模型额度。AI 会把相关项目资料发给你配置的服务，费用与数据处理方式由该服务决定；不配置 AI 也能同步、搜索和浏览收藏。
+
 ## 能帮你做什么
 
 | 你遇到的问题 | Star Library 的做法 |
