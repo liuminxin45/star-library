@@ -1,5 +1,7 @@
 # Star Library
 
+<img src="docs/images/project-logo.png" width="160" alt="star-library logo" />
+
 **约 167 KB 的 GitHub Stars 管理器，让收藏不再吃灰。**
 
 把收藏过的项目整理成中文项目库：看懂项目用途、搜索已有收藏，再根据兴趣发现值得尝试的新工具。
